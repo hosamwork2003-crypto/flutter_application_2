@@ -52,6 +52,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
   final MidiPro _midi = MidiPro();
   bool _audioReady = false;
+  bool _isWarmingUp = false;
 
   late final List<PianoNote> _allNotes;
 
@@ -77,7 +78,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
   final List<int> _activeNotes = [];
   static const int _maxSimultaneousNotes = 6;
-  static const int _defaultVelocity = 120;
+  static const int _defaultVelocity = 127;
 
   @override
   void initState() {
@@ -94,15 +95,32 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   }
 
   Future<void> _initMidiEngine() async {
+    if (_isWarmingUp) return;
+
+    setState(() {
+      _isWarmingUp = true;
+      _audioReady = false;
+      _message = 'جارٍ تجهيز صوت البيانو...';
+    });
+
     try {
       await _midi.loadSoundfont(
         sf2Path: 'assets/soundfonts/export.sf2',
         instrumentIndex: 0,
       );
 
+      // Warm-up: تشغيل نغمة شبه صامتة مرة واحدة لتجهيز محرك الصوت
+      // وتقليل التعليق في أول ضغطة حقيقية.
+      _midi.playMidiNote(midi: 60, velocity: 1);
+      await Future.delayed(const Duration(milliseconds: 45));
+      _midi.stopMidiNote(midi: 60);
+      await Future.delayed(const Duration(milliseconds: 10));
+
       if (!mounted) return;
       setState(() {
         _audioReady = true;
+        _isWarmingUp = false;
+        _message = 'بيانو حر: اضغط على أي مفتاح';
       });
     } catch (e) {
       debugPrint('MIDI init error: $e');
@@ -110,6 +128,8 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
       if (!mounted) return;
       setState(() {
         _audioReady = false;
+        _isWarmingUp = false;
+        _message = 'تعذر تجهيز صوت البيانو';
       });
     }
   }
@@ -152,6 +172,8 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   void _playNoteSound(PianoNote note, {int velocity = _defaultVelocity}) {
     if (!_audioReady) return;
 
+    final safeVelocity = velocity.clamp(1, 127);
+
     _activeNotes.remove(note.midiNumber);
 
     if (_activeNotes.length >= _maxSimultaneousNotes) {
@@ -159,7 +181,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
       _midi.stopMidiNote(midi: oldest);
     }
 
-    _midi.playMidiNote(midi: note.midiNumber, velocity: velocity);
+    _midi.playMidiNote(midi: note.midiNumber, velocity: safeVelocity);
     _activeNotes.add(note.midiNumber);
   }
 
@@ -178,35 +200,52 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   }
 
   void _playNote(PianoNote note) {
+    if (!_audioReady || _isWarmingUp) return;
     if (_lastPlayedKey == note.noteId) return;
     _lastPlayedKey = note.noteId;
 
-    if (_currentNote != null &&
-        _currentNote!.noteId != note.noteId &&
+    final previousNote = _currentNote;
+
+    if (previousNote != null &&
+        previousNote.noteId != note.noteId &&
         !_isPlayingTeacherSequence) {
-      _stopNoteSound(_currentNote!);
+      _stopNoteSound(previousNote);
     }
 
     _playNoteSound(note);
 
     if (!mounted) return;
 
-    setState(() {
-      _currentNote = note;
-      _pressedNoteId = note.noteId;
-    });
+    String nextMessage = _message;
+    bool shouldShowWrongSnack = false;
+    bool shouldShowMissingTeacherSnack = false;
+    bool shouldShowCorrectSnack = false;
+    bool shouldShowSuccessSnack = false;
+    int earned = 0;
 
-    if (_isPlayingTeacherSequence) return;
+    if (_isPlayingTeacherSequence) {
+      setState(() {
+        _currentNote = note;
+        _pressedNoteId = note.noteId;
+      });
+      return;
+    }
 
     if (_gameState == 0) {
+      nextMessage = 'بيانو حر: ${note.arabicName}';
+
       setState(() {
-        _message = 'بيانو حر: ${note.arabicName}';
+        _currentNote = note;
+        _pressedNoteId = note.noteId;
+        _message = nextMessage;
       });
       return;
     }
 
     if (_gameState == 1) {
       setState(() {
+        _currentNote = note;
+        _pressedNoteId = note.noteId;
         _teacherSequence.add(note);
         _message = 'تم تسجيل ${note.arabicName} في تسلسل المعلّم';
       });
@@ -214,16 +253,25 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     }
 
     if (_teacherSequence.isEmpty) {
+      shouldShowMissingTeacherSnack = true;
+
       setState(() {
+        _currentNote = note;
+        _pressedNoteId = note.noteId;
         _message = 'سجّل تسلسل المعلّم أولًا';
       });
-      _showSnack('لا يوجد تسلسل محفوظ بعد', Colors.orange);
+
+      if (shouldShowMissingTeacherSnack) {
+        _showSnack('لا يوجد تسلسل محفوظ بعد', Colors.orange);
+      }
       return;
     }
 
     final expectedIndex = _childSequence.length;
     if (expectedIndex >= _teacherSequence.length) {
       setState(() {
+        _currentNote = note;
+        _pressedNoteId = note.noteId;
         _childSequence.clear();
       });
       return;
@@ -235,31 +283,53 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
         note.octave == expectedNote.octave;
 
     if (!isCorrect) {
+      shouldShowWrongSnack = true;
+
       setState(() {
+        _currentNote = note;
+        _pressedNoteId = note.noteId;
         _childSequence.clear();
         _message = 'خطأ. ابدأ من أول التسلسل';
       });
-      _showSnack('خطأ. ابدأ من البداية', Colors.red);
+
+      if (shouldShowWrongSnack) {
+        _showSnack('خطأ. ابدأ من البداية', Colors.red);
+      }
       return;
     }
 
+    final completedSequence =
+        (_childSequence.length + 1) == _teacherSequence.length;
+
+    if (completedSequence) {
+      earned = _teacherSequence.length * 10;
+      shouldShowSuccessSnack = true;
+
+      setState(() {
+        _currentNote = note;
+        _pressedNoteId = note.noteId;
+        _childSequence.clear();
+        _score += earned;
+        _stars += 1;
+        _message = 'أحسنت! الطفل نفذ التسلسل كاملًا';
+      });
+
+      if (shouldShowSuccessSnack) {
+        _showSnack('ممتاز! +$earned نقطة ⭐', Colors.green);
+      }
+      return;
+    }
+
+    shouldShowCorrectSnack = true;
+
     setState(() {
+      _currentNote = note;
+      _pressedNoteId = note.noteId;
       _childSequence.add(note);
       _message = 'صحيح! أكمل باقي التسلسل';
     });
 
-    if (_childSequence.length == _teacherSequence.length) {
-      final earned = _teacherSequence.length * 10;
-
-      setState(() {
-        _score += earned;
-        _stars += 1;
-        _childSequence.clear();
-        _message = 'أحسنت! الطفل نفذ التسلسل كاملًا';
-      });
-
-      _showSnack('ممتاز! +$earned نقطة ⭐', Colors.green);
-    } else {
+    if (shouldShowCorrectSnack) {
       _showSnack('صحيح، أكمل', Colors.green);
     }
   }
@@ -284,7 +354,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
         _pressedNoteId = note.noteId;
       });
 
-      _playNoteSound(note, velocity: 115);
+      _playNoteSound(note, velocity: 127);
       await Future.delayed(const Duration(milliseconds: 320));
       _stopNoteSound(note);
       await Future.delayed(const Duration(milliseconds: 50));
@@ -544,17 +614,17 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     }
   }
 
-  void _handlePointerEnd() {
-    _isFingerDown = false;
-    _isPianoTouchActive = false;
-    _lastPlayedKey = null;
+ void _handlePointerEnd() {
+  _isFingerDown = false;
+  _isPianoTouchActive = false;
+  _lastPlayedKey = null;
 
-    if (!mounted) return;
+  if (!mounted) return;
 
-    setState(() {
-      _pressedNoteId = null;
-    });
-  }
+  setState(() {
+    _pressedNoteId = null;
+  });
+}
 
   List<Widget> _buildBlackKeyOverlays({
     required List<PianoNote> visibleWhiteNotes,
@@ -824,6 +894,10 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                         _InfoChip(label: 'تسلسل المعلّم: ${_teacherSequence.length}', color: Colors.blue),
                         _InfoChip(label: 'ما أدخله الطفل: ${_childSequence.length}', color: Colors.pink),
                         _InfoChip(label: 'اللاعب: $_playerName', color: Colors.indigo),
+                        _InfoChip(
+                          label: _audioReady ? 'الصوت جاهز' : 'جارٍ تجهيز الصوت',
+                          color: _audioReady ? Colors.green : Colors.redAccent,
+                        ),
                       ],
                     ),
                     const SizedBox(height: 14),
@@ -875,62 +949,65 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                     : const BouncingScrollPhysics(),
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Listener(
-                  onPointerDown: (event) => _handlePointerDown(
-                    event: event,
-                    visibleNotes: visibleNotes,
-                    visibleWhiteNotes: visibleWhiteNotes,
-                    whiteKeyWidth: whiteKeyWidth,
-                    whiteKeyHeight: whiteKeyHeight,
-                    blackKeyWidth: blackKeyWidth,
-                    blackKeyHeight: blackKeyHeight,
-                  ),
-                  onPointerMove: (event) => _handlePointerMove(
-                    event: event,
-                    visibleNotes: visibleNotes,
-                    visibleWhiteNotes: visibleWhiteNotes,
-                    whiteKeyWidth: whiteKeyWidth,
-                    whiteKeyHeight: whiteKeyHeight,
-                    blackKeyWidth: blackKeyWidth,
-                    blackKeyHeight: blackKeyHeight,
-                  ),
-                  onPointerUp: (_) => _handlePointerEnd(),
-                  onPointerCancel: (_) => _handlePointerEnd(),
-                  child: SizedBox(
-                    key: _pianoAreaKey,
-                    width: pianoWidth,
-                    height: whiteKeyHeight,
-                    child: Stack(
-                      clipBehavior: Clip.hardEdge,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: visibleWhiteNotes
-                              .map(
-                                (note) => Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 2),
-                                  child: _WhiteKey(
-                                    note: note,
-                                    color: _keyAccent(note.noteName),
-                                    width: whiteKeyWidth,
-                                    height: whiteKeyHeight,
-                                    isHighlighted: _highlightedNote?.noteId == note.noteId,
-                                    isPressed: !_isPlayingTeacherSequence &&
-                                        _pressedNoteId == note.noteId,
-                                    isTeacherDemo: _isTeacherDemoKey(note),
+                child: IgnorePointer(
+                  ignoring: !_audioReady || _isWarmingUp,
+                  child: Listener(
+                    onPointerDown: (event) => _handlePointerDown(
+                      event: event,
+                      visibleNotes: visibleNotes,
+                      visibleWhiteNotes: visibleWhiteNotes,
+                      whiteKeyWidth: whiteKeyWidth,
+                      whiteKeyHeight: whiteKeyHeight,
+                      blackKeyWidth: blackKeyWidth,
+                      blackKeyHeight: blackKeyHeight,
+                    ),
+                    onPointerMove: (event) => _handlePointerMove(
+                      event: event,
+                      visibleNotes: visibleNotes,
+                      visibleWhiteNotes: visibleWhiteNotes,
+                      whiteKeyWidth: whiteKeyWidth,
+                      whiteKeyHeight: whiteKeyHeight,
+                      blackKeyWidth: blackKeyWidth,
+                      blackKeyHeight: blackKeyHeight,
+                    ),
+                    onPointerUp: (_) => _handlePointerEnd(),
+                    onPointerCancel: (_) => _handlePointerEnd(),
+                    child: SizedBox(
+                      key: _pianoAreaKey,
+                      width: pianoWidth,
+                      height: whiteKeyHeight,
+                      child: Stack(
+                        clipBehavior: Clip.hardEdge,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: visibleWhiteNotes
+                                .map(
+                                  (note) => Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                                    child: _WhiteKey(
+                                      note: note,
+                                      color: _keyAccent(note.noteName),
+                                      width: whiteKeyWidth,
+                                      height: whiteKeyHeight,
+                                      isHighlighted: _highlightedNote?.noteId == note.noteId,
+                                      isPressed: !_isPlayingTeacherSequence &&
+                                          _pressedNoteId == note.noteId,
+                                      isTeacherDemo: _isTeacherDemoKey(note),
+                                    ),
                                   ),
-                                ),
-                              )
-                              .toList(),
-                        ),
-                        ..._buildBlackKeyOverlays(
-                          visibleWhiteNotes: visibleWhiteNotes,
-                          visibleNotes: visibleNotes,
-                          whiteKeyWidth: whiteKeyWidth,
-                          blackKeyWidth: blackKeyWidth,
-                          blackKeyHeight: blackKeyHeight,
-                        ),
-                      ],
+                                )
+                                .toList(),
+                          ),
+                          ..._buildBlackKeyOverlays(
+                            visibleWhiteNotes: visibleWhiteNotes,
+                            visibleNotes: visibleNotes,
+                            whiteKeyWidth: whiteKeyWidth,
+                            blackKeyWidth: blackKeyWidth,
+                            blackKeyHeight: blackKeyHeight,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
