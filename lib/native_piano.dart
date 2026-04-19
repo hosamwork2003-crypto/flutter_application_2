@@ -20,6 +20,14 @@ class NativePiano {
     });
   }
 
+  static void noteOnMany(List<int> midis, {int velocity = 127}) {
+    if (!_initialized || midis.isEmpty) return;
+    _channel.invokeMethod<void>('noteOnMany', {
+      'midis': midis,
+      'velocity': velocity,
+    });
+  }
+
   static void noteOff(int midi) {
     if (!_initialized) return;
     _channel.invokeMethod<void>('noteOff', {
@@ -32,11 +40,10 @@ class NativePiano {
     _channel.invokeMethod<void>('allNotesOff');
   }
 
-  // 👇 الجديد
   static Future<void> release() async {
     if (!_initialized) return;
 
     await _channel.invokeMethod<void>('release');
-    _initialized = false; // 👈 مهم عشان لما ترجع تاني يعمل init من جديد
+    _initialized = false;
   }
 }

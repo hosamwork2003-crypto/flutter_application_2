@@ -21,11 +21,14 @@ struct NoteEvent {
         NoteOn = 1,
         NoteOff = 2,
         AllNotesOff = 3,
+        NoteOnMany = 4,
     };
 
     int type = 0;
     int midi = 0;
     int velocity = 127;
+    int count = 0;
+    int midis[10] = {0};
 };
 
 static constexpr int kEventQueueSize = 512;
@@ -129,6 +132,15 @@ public:
                     tsf_note_on(g_tsf, 0, event.midi, vel);
                     break;
                 }
+                case NoteEvent::NoteOnMany: {
+                    float vel = event.velocity / 127.0f;
+                    if (vel < 0.05f) vel = 0.05f;
+                    if (vel > 0.75f) vel = 0.75f;
+                    for (int i = 0; i < event.count; ++i) {
+                        tsf_note_on(g_tsf, 0, event.midis[i], vel);
+                    }
+                    break;
+                }
                 case NoteEvent::NoteOff:
                     tsf_note_off(g_tsf, 0, event.midi);
                     break;
@@ -198,6 +210,36 @@ Java_com_example_flutter_1application_11_MainActivity_nativeNoteOn(
         jint midi,
         jint velocity) {
     enqueueEvent(NoteEvent{NoteEvent::NoteOn, midi, velocity});
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_flutter_1application_11_MainActivity_nativeNoteOnMany(
+        JNIEnv* env,
+        jobject /*thiz*/,
+        jintArray midis,
+        jint velocity) {
+    if (midis == nullptr) return;
+
+    jsize len = env->GetArrayLength(midis);
+    if (len <= 0) return;
+
+    if (len > 10) len = 10;
+
+    jint* arr = env->GetIntArrayElements(midis, nullptr);
+    if (arr == nullptr) return;
+
+    NoteEvent event{};
+    event.type = NoteEvent::NoteOnMany;
+    event.velocity = velocity;
+    event.count = static_cast<int>(len);
+
+    for (int i = 0; i < len; ++i) {
+        event.midis[i] = arr[i];
+    }
+
+    env->ReleaseIntArrayElements(midis, arr, JNI_ABORT);
+    enqueueEvent(event);
 }
 
 extern "C"

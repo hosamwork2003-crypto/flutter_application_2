@@ -3,6 +3,7 @@ import 'package:flutter_application_1/native_piano.dart';
 import '../services/api_client.dart';
 import '../services/piano_api.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 class PianoNote {
   final String noteName;
@@ -70,9 +71,13 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   final Map<int, PianoNote> _pointerToNote = <int, PianoNote>{};
   final Set<int> _activePointers = <int>{};
   final Map<int, Offset> _lastPointerPos = <int, Offset>{};
+  final Map<int, DateTime> _pointerDownTimes = <int, DateTime>{};
   final Map<int, DateTime> _recentPlayedNotes = <int, DateTime>{};
+  final Map<int, DateTime> _noteStartTimes = <int, DateTime>{};
+  final Map<int, int> _notePlayStamps = <int, int>{};
   final List<PianoNote> _teacherSequence = <PianoNote>[];
   final List<PianoNote> _childSequence = <PianoNote>[];
+  final List<PianoNote> _pendingDownChordNotes = <PianoNote>[];
 
   late final ValueNotifier<Set<String>> _pressedNoteIdsNotifier;
   late final ValueNotifier<PianoNote?> _currentNoteNotifier;
@@ -89,54 +94,74 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
   bool _audioReady = false;
   bool _isWarmingUp = false;
+  bool _isDownChordBatchScheduled = false;
   int _visibleKeyCount = 18;
+  int _noteStampSeed = 0;
+  double _scrollValue = 0.0;
 
   static const int _defaultVelocity = 127;
+  static const int _downChordWindowMs = 28;
+  static const int _shortTapMinSoundMs = 320;
+  static const int _longPressThresholdMs = 280;
+  static const int _longPressTailMs = 480;
   static const String _sf2AssetPath = 'assets/soundfonts/SalC5Light2.sf2';
 
   @override
-  void initState() {
-    super.initState();
-    _allNotes = _buildAvailableNotes();
+@override
+void initState() {
+  super.initState();
 
-    _pressedNoteIdsNotifier = ValueNotifier<Set<String>>(<String>{});
-    _currentNoteNotifier = ValueNotifier<PianoNote?>(null);
-    _messageNotifier = ValueNotifier<String>('بيانو حر: اضغط على أي مفتاح');
-    _highlightedNoteNotifier = ValueNotifier<PianoNote?>(null);
-    _isPlayingTeacherSequenceNotifier = ValueNotifier<bool>(false);
-    _hasActiveTouchesNotifier = ValueNotifier<bool>(false);
-    _scoreNotifier = ValueNotifier<int>(0);
-    _starsNotifier = ValueNotifier<int>(0);
-    _teacherSequenceLengthNotifier = ValueNotifier<int>(0);
-    _childSequenceLengthNotifier = ValueNotifier<int>(0);
-    _gameStateNotifier = ValueNotifier<int>(0);
-    _playerNameNotifier = ValueNotifier<String>('');
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
 
-    _initMidiEngine();
-    _loadPianoProfile();
-  }
+  _allNotes = _buildAvailableNotes();
+
+  _pressedNoteIdsNotifier = ValueNotifier<Set<String>>(<String>{});
+  _currentNoteNotifier = ValueNotifier<PianoNote?>(null);
+  _messageNotifier = ValueNotifier<String>('بيانو حر: اضغط على أي مفتاح');
+  _highlightedNoteNotifier = ValueNotifier<PianoNote?>(null);
+  _isPlayingTeacherSequenceNotifier = ValueNotifier<bool>(false);
+  _hasActiveTouchesNotifier = ValueNotifier<bool>(false);
+  _scoreNotifier = ValueNotifier<int>(0);
+  _starsNotifier = ValueNotifier<int>(0);
+  _teacherSequenceLengthNotifier = ValueNotifier<int>(0);
+  _childSequenceLengthNotifier = ValueNotifier<int>(0);
+  _gameStateNotifier = ValueNotifier<int>(0);
+  _playerNameNotifier = ValueNotifier<String>('');
+
+  _scrollController.addListener(_syncScrollValue);
+
+  _initMidiEngine();
+  _loadPianoProfile();
+}
 
   @override
-  void dispose() {
-    _stopAllActiveNotes();
-    NativePiano.release();
+@override
+void dispose() {
+  _stopAllActiveNotes();
+  NativePiano.release();
 
-    _scrollController.dispose();
-    _pressedNoteIdsNotifier.dispose();
-    _currentNoteNotifier.dispose();
-    _messageNotifier.dispose();
-    _highlightedNoteNotifier.dispose();
-    _isPlayingTeacherSequenceNotifier.dispose();
-    _hasActiveTouchesNotifier.dispose();
-    _scoreNotifier.dispose();
-    _starsNotifier.dispose();
-    _teacherSequenceLengthNotifier.dispose();
-    _childSequenceLengthNotifier.dispose();
-    _gameStateNotifier.dispose();
-    _playerNameNotifier.dispose();
+  _scrollController.removeListener(_syncScrollValue);
+  _scrollController.dispose();
+  _pressedNoteIdsNotifier.dispose();
+  _currentNoteNotifier.dispose();
+  _messageNotifier.dispose();
+  _highlightedNoteNotifier.dispose();
+  _isPlayingTeacherSequenceNotifier.dispose();
+  _hasActiveTouchesNotifier.dispose();
+  _scoreNotifier.dispose();
+  _starsNotifier.dispose();
+  _teacherSequenceLengthNotifier.dispose();
+  _childSequenceLengthNotifier.dispose();
+  _gameStateNotifier.dispose();
+  _playerNameNotifier.dispose();
 
-    super.dispose();
-  }
+  SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+
+  super.dispose();
+}
 
   Future<void> _loadPianoProfile() async {
     try {
@@ -268,6 +293,44 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     return notes;
   }
 
+  void _syncScrollValue() {
+    if (!_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    final next =
+        max <= 0 ? 0.0 : (_scrollController.offset / max).clamp(0.0, 1.0);
+    if ((_scrollValue - next).abs() > 0.001 && mounted) {
+      setState(() {
+        _scrollValue = next;
+      });
+    }
+  }
+
+  void _jumpToScrollFraction(double value) {
+    if (!_scrollController.hasClients) return;
+
+    double maxExtent;
+    try {
+      maxExtent = _scrollController.position.maxScrollExtent;
+    } catch (_) {
+      return;
+    }
+
+    final clamped = value.clamp(0.0, 1.0);
+    final target = maxExtent * clamped;
+    _scrollController.jumpTo(target);
+
+    if ((_scrollValue - clamped).abs() > 0.001 && mounted) {
+      setState(() {
+        _scrollValue = clamped;
+      });
+    }
+  }
+
+  void _stepMiniScroll(double direction, double viewportFraction) {
+    final step = (1 - viewportFraction) * 0.18;
+    _jumpToScrollFraction((_scrollValue + (direction * step)).clamp(0.0, 1.0));
+  }
+
   void _setPressedNote(String noteId, bool pressed) {
     final current = _pressedNoteIdsNotifier.value;
     if (pressed) {
@@ -322,6 +385,86 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     }
   }
 
+  bool _canTriggerNote(PianoNote note, {int retriggerGapMs = 35}) {
+    final now = DateTime.now();
+    final last = _recentPlayedNotes[note.midiNumber];
+    if (last != null && now.difference(last).inMilliseconds < retriggerGapMs) {
+      return false;
+    }
+    return true;
+  }
+
+  int _markNoteStarted(PianoNote note) {
+    final now = DateTime.now();
+    final stamp = ++_noteStampSeed;
+    _recentPlayedNotes[note.midiNumber] = now;
+    _noteStartTimes[note.midiNumber] = now;
+    _notePlayStamps[note.midiNumber] = stamp;
+    return stamp;
+  }
+
+  void _startLiveNote(
+    PianoNote note, {
+    int velocity = _defaultVelocity,
+    int retriggerGapMs = 35,
+  }) {
+    if (!_audioReady) return;
+    if (!_canTriggerNote(note, retriggerGapMs: retriggerGapMs)) return;
+
+    final safeVelocity = velocity.clamp(1, 127);
+    NativePiano.noteOn(note.midiNumber, velocity: safeVelocity);
+    _markNoteStarted(note);
+  }
+
+  List<PianoNote> _startLiveChordNotes(
+    List<PianoNote> notes, {
+    int velocity = _defaultVelocity,
+    int retriggerGapMs = 35,
+  }) {
+    if (!_audioReady || notes.isEmpty) return <PianoNote>[];
+
+    final uniqueNotes = <PianoNote>[];
+    final seen = <String>{};
+    for (final note in notes) {
+      if (seen.add(note.noteId)) {
+        uniqueNotes.add(note);
+      }
+    }
+
+    final playable = <PianoNote>[];
+    for (final note in uniqueNotes) {
+      if (_canTriggerNote(note, retriggerGapMs: retriggerGapMs)) {
+        playable.add(note);
+      }
+    }
+
+    if (playable.isEmpty) return <PianoNote>[];
+
+    final safeVelocity = velocity.clamp(1, 127);
+    NativePiano.noteOnMany(
+      playable.map((n) => n.midiNumber).toList(),
+      velocity: safeVelocity,
+    );
+
+    for (final note in playable) {
+      _markNoteStarted(note);
+    }
+
+    return playable;
+  }
+
+  void _scheduleTimedNoteOff(int midiNumber, int stamp, int holdMs) {
+    Future.delayed(Duration(milliseconds: holdMs), () {
+      final lastStamp = _notePlayStamps[midiNumber];
+      if (lastStamp != stamp) return;
+
+      NativePiano.noteOff(midiNumber);
+      _notePlayStamps.remove(midiNumber);
+      _noteStartTimes.remove(midiNumber);
+      _recentPlayedNotes.remove(midiNumber);
+    });
+  }
+
   void _performNoteSound(
     PianoNote note, {
     int velocity = _defaultVelocity,
@@ -329,26 +472,70 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     int retriggerGapMs = 35,
   }) {
     if (!_audioReady) return;
-
-    final now = DateTime.now();
-    final last = _recentPlayedNotes[note.midiNumber];
-
-    if (last != null && now.difference(last).inMilliseconds < retriggerGapMs) {
-      return;
-    }
-
-    _recentPlayedNotes[note.midiNumber] = now;
+    if (!_canTriggerNote(note, retriggerGapMs: retriggerGapMs)) return;
 
     final safeVelocity = velocity.clamp(1, 127);
     NativePiano.noteOn(note.midiNumber, velocity: safeVelocity);
+    final stamp = _markNoteStarted(note);
+    _scheduleTimedNoteOff(note.midiNumber, stamp, holdMs);
+  }
 
-    final stamp = now;
-    Future.delayed(Duration(milliseconds: holdMs), () {
+  void _releaseLiveNoteForPointer(int pointer, PianoNote note) {
+    final downAt = _pointerDownTimes[pointer] ?? DateTime.now();
+    final startAt = _noteStartTimes[note.midiNumber] ?? downAt;
+    final heldMs = DateTime.now().difference(downAt).inMilliseconds;
+    final playedMs = DateTime.now().difference(startAt).inMilliseconds;
+
+    final tailMs = heldMs >= _longPressThresholdMs
+        ? _longPressTailMs
+        : (_shortTapMinSoundMs - playedMs).clamp(0, _shortTapMinSoundMs);
+
+    final stamp = _notePlayStamps[note.midiNumber];
+    if (stamp == null) {
       NativePiano.noteOff(note.midiNumber);
+      _noteStartTimes.remove(note.midiNumber);
+      _recentPlayedNotes.remove(note.midiNumber);
+      return;
+    }
 
-      final lastSeen = _recentPlayedNotes[note.midiNumber];
-      if (lastSeen == stamp) {
-        _recentPlayedNotes.remove(note.midiNumber);
+    Future.delayed(Duration(milliseconds: tailMs), () {
+      final lastStamp = _notePlayStamps[note.midiNumber];
+      if (lastStamp != stamp) return;
+
+      NativePiano.noteOff(note.midiNumber);
+      _notePlayStamps.remove(note.midiNumber);
+      _noteStartTimes.remove(note.midiNumber);
+      _recentPlayedNotes.remove(note.midiNumber);
+    });
+  }
+
+  void _queuePointerDownChordNote(PianoNote note) {
+    if (!_audioReady || _isWarmingUp) return;
+
+    if (_pendingDownChordNotes.any((n) => n.noteId == note.noteId)) {
+      return;
+    }
+
+    _pendingDownChordNotes.add(note);
+
+    if (_isDownChordBatchScheduled) return;
+    _isDownChordBatchScheduled = true;
+
+    Future.delayed(const Duration(milliseconds: _downChordWindowMs), () {
+      final notes = List<PianoNote>.from(_pendingDownChordNotes);
+      _pendingDownChordNotes.clear();
+      _isDownChordBatchScheduled = false;
+
+      if (notes.isEmpty) return;
+
+      if (notes.length == 1) {
+        _performUserNote(notes.first);
+        return;
+      }
+
+      final playedNotes = _startLiveChordNotes(notes);
+      for (final note in playedNotes) {
+        _handleModeAfterPerformedNote(note);
       }
     });
   }
@@ -357,6 +544,10 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     if (!_audioReady) return;
     NativePiano.allNotesOff();
     _recentPlayedNotes.clear();
+    _noteStartTimes.clear();
+    _notePlayStamps.clear();
+    _pendingDownChordNotes.clear();
+    _isDownChordBatchScheduled = false;
   }
 
   void _handleModeAfterPerformedNote(PianoNote note) {
@@ -438,7 +629,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
   void _performUserNote(PianoNote note) {
     if (!_audioReady || _isWarmingUp) return;
-    _performNoteSound(note);
+    _startLiveNote(note);
     _handleModeAfterPerformedNote(note);
   }
 
@@ -446,6 +637,8 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     if (_teacherSequence.isEmpty || _isPlayingTeacherSequenceNotifier.value) {
       return;
     }
+
+    final teacherSequenceSnapshot = List<PianoNote>.from(_teacherSequence);
 
     _stopAllActiveNotes();
 
@@ -456,9 +649,12 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     _pointerToNote.clear();
     _activePointers.clear();
     _lastPointerPos.clear();
+    _pointerDownTimes.clear();
+    _pendingDownChordNotes.clear();
+    _isDownChordBatchScheduled = false;
     _updatePointerActivity();
 
-    for (final note in _teacherSequence) {
+    for (final note in teacherSequenceSnapshot) {
       if (!mounted) return;
 
       _setHighlightedNote(note);
@@ -684,6 +880,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   }) {
     _activePointers.add(event.pointer);
     _lastPointerPos[event.pointer] = event.position;
+    _pointerDownTimes[event.pointer] = DateTime.now();
     _updatePointerActivity();
 
     final note = _findNoteAtPosition(
@@ -701,7 +898,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
     _pointerToNote[event.pointer] = note;
     _setPressedNote(note.noteId, true);
-    _performUserNote(note);
+    _queuePointerDownChordNote(note);
   }
 
   void _handlePointerMove({
@@ -744,6 +941,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
       if (prev != null && note == null) {
         _setPressedNote(prev.noteId, false);
+        _releaseLiveNoteForPointer(event.pointer, prev);
         _pointerToNote.remove(event.pointer);
         _updatePointerActivity();
         break;
@@ -756,9 +954,11 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
         if (prev != null) {
           _setPressedNote(prev.noteId, false);
+          _releaseLiveNoteForPointer(event.pointer, prev);
         }
 
         _pointerToNote[event.pointer] = note;
+        _pointerDownTimes[event.pointer] = DateTime.now();
         _updatePointerActivity();
         _setPressedNote(note.noteId, true);
         _performUserNote(note);
@@ -775,8 +975,10 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
     if (note != null) {
       _setPressedNote(note.noteId, false);
+      _releaseLiveNoteForPointer(event.pointer, note);
     }
 
+    _pointerDownTimes.remove(event.pointer);
     _lastPointerPos.remove(event.pointer);
     _updatePointerActivity();
 
@@ -790,7 +992,10 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     _activePointers.clear();
     _pointerToNote.clear();
     _lastPointerPos.clear();
+    _pointerDownTimes.clear();
     _pressedNoteIdsNotifier.value = <String>{};
+    _pendingDownChordNotes.clear();
+    _isDownChordBatchScheduled = false;
     _updatePointerActivity();
     _scoreNotifier.value = 0;
     _starsNotifier.value = 0;
@@ -807,7 +1012,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   @override
   Widget build(BuildContext context) {
     final screenHeight = MediaQuery.of(context).size.height;
-    final clampedVisibleCount = _visibleKeyCount.clamp(7, 89);
+    final clampedVisibleCount = _visibleKeyCount.clamp(7, 52);
 
     final zoom = 30 / clampedVisibleCount;
     final whiteKeyWidth = (48 * zoom).clamp(42.0, 92.0);
@@ -831,6 +1036,10 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
         (visibleWhiteNotes.length * whiteKeyWidth) +
         ((visibleWhiteNotes.length - 1) * 4) +
         blackKeyWidth;
+    final availablePianoViewportWidth =
+        (MediaQuery.of(context).size.width - 24).clamp(1.0, double.infinity);
+    final miniViewportFraction =
+        (availablePianoViewportWidth / pianoWidth).clamp(0.08, 1.0);
 
     return Scaffold(
       key: _scaffoldKey,
@@ -915,7 +1124,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                           onPressed: () {
                             setState(() {
                               _visibleKeyCount =
-                                  (_visibleKeyCount - 3).clamp(7, 89);
+                                  (_visibleKeyCount - 3).clamp(7, 52);
                             });
                           },
                           icon: const Icon(Icons.remove_circle, size: 32),
@@ -935,7 +1144,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                           onPressed: () {
                             setState(() {
                               _visibleKeyCount =
-                                  (_visibleKeyCount + 3).clamp(7, 89);
+                                  (_visibleKeyCount + 3).clamp(7, 52);
                             });
                           },
                           icon: const Icon(Icons.add_circle, size: 32),
@@ -944,7 +1153,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'كلما قلّ الرقم كبرت المفاتيح أكثر، وكل المفاتيح تظل متاحة بالسحب.',
+                      'الحد الأقصى 52 مفتاحًا أبيض، وعندها يظهر البيانو الكامل بمفاتيحه البيضاء والسوداء.',
                       style: TextStyle(color: Colors.grey.shade700),
                     ),
                   ],
@@ -993,104 +1202,107 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
               onReset: _resetGame,
             ),
             Expanded(
-              child: ValueListenableBuilder<bool>(
-                valueListenable: _hasActiveTouchesNotifier,
-                builder: (context, hasActiveTouches, _) {
-                  return SingleChildScrollView(
-                    controller: _scrollController,
-                    physics: hasActiveTouches
-                        ? const NeverScrollableScrollPhysics()
-                        : const BouncingScrollPhysics(),
-                    scrollDirection: Axis.horizontal,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    child: IgnorePointer(
-                      ignoring: !_audioReady || _isWarmingUp,
-                      child: Listener(
-                        onPointerDown: (event) => _handlePointerDown(
-                          event: event,
-                          visibleWhiteNotes: visibleWhiteNotes,
-                          blackPlacements: blackPlacements,
-                          whiteKeyWidth: whiteKeyWidth,
-                          whiteKeyHeight: whiteKeyHeight,
-                          blackKeyWidth: blackKeyWidth,
-                          blackKeyHeight: blackKeyHeight,
-                        ),
-                        onPointerMove: (event) => _handlePointerMove(
-                          event: event,
-                          visibleWhiteNotes: visibleWhiteNotes,
-                          blackPlacements: blackPlacements,
-                          whiteKeyWidth: whiteKeyWidth,
-                          whiteKeyHeight: whiteKeyHeight,
-                          blackKeyWidth: blackKeyWidth,
-                          blackKeyHeight: blackKeyHeight,
-                        ),
-                        onPointerUp: _handlePointerEnd,
-                        onPointerCancel: _handlePointerEnd,
-                        child: SizedBox(
-                          key: _pianoAreaKey,
-                          width: pianoWidth,
-                          height: whiteKeyHeight,
-                          child: Stack(
-                            clipBehavior: Clip.hardEdge,
-                            children: [
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: visibleWhiteNotes
-                                    .map(
-                                      (note) => Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 2,
-                                        ),
-                                        child: RepaintBoundary(
-                                          child: _WhiteKey(
-                                            note: note,
-                                            color: _keyAccent(note.noteName),
-                                            width: whiteKeyWidth,
-                                            height: whiteKeyHeight,
-                                            highlightedNoteListenable:
-                                                _highlightedNoteNotifier,
-                                            isPlayingTeacherSequenceListenable:
-                                                _isPlayingTeacherSequenceNotifier,
-                                          ),
-                                        ),
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                physics: const NeverScrollableScrollPhysics(),
+                scrollDirection: Axis.horizontal,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: IgnorePointer(
+                  ignoring: !_audioReady || _isWarmingUp,
+                  child: Listener(
+                    onPointerDown: (event) => _handlePointerDown(
+                      event: event,
+                      visibleWhiteNotes: visibleWhiteNotes,
+                      blackPlacements: blackPlacements,
+                      whiteKeyWidth: whiteKeyWidth,
+                      whiteKeyHeight: whiteKeyHeight,
+                      blackKeyWidth: blackKeyWidth,
+                      blackKeyHeight: blackKeyHeight,
+                    ),
+                    onPointerMove: (event) => _handlePointerMove(
+                      event: event,
+                      visibleWhiteNotes: visibleWhiteNotes,
+                      blackPlacements: blackPlacements,
+                      whiteKeyWidth: whiteKeyWidth,
+                      whiteKeyHeight: whiteKeyHeight,
+                      blackKeyWidth: blackKeyWidth,
+                      blackKeyHeight: blackKeyHeight,
+                    ),
+                    onPointerUp: _handlePointerEnd,
+                    onPointerCancel: _handlePointerEnd,
+                    child: SizedBox(
+                      key: _pianoAreaKey,
+                      width: pianoWidth,
+                      height: whiteKeyHeight,
+                      child: Stack(
+                        clipBehavior: Clip.hardEdge,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: visibleWhiteNotes
+                                .map(
+                                  (note) => Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 2,
+                                    ),
+                                    child: RepaintBoundary(
+                                      child: _WhiteKey(
+                                        note: note,
+                                        color: _keyAccent(note.noteName),
+                                        width: whiteKeyWidth,
+                                        height: whiteKeyHeight,
+                                        highlightedNoteListenable:
+                                            _highlightedNoteNotifier,
+                                        isPlayingTeacherSequenceListenable:
+                                            _isPlayingTeacherSequenceNotifier,
                                       ),
-                                    )
-                                    .toList(),
-                              ),
-                              ...blackPlacements.map(
-                                (placement) => Positioned(
-                                  left: placement.left,
-                                  top: 0,
-                                  child: RepaintBoundary(
-                                    child: _BlackKey(
-                                      note: placement.note,
-                                      width: blackKeyWidth,
-                                      height: blackKeyHeight,
-                                      highlightedNoteListenable:
-                                          _highlightedNoteNotifier,
-                                      isPlayingTeacherSequenceListenable:
-                                          _isPlayingTeacherSequenceNotifier,
                                     ),
                                   ),
+                                )
+                                .toList(),
+                          ),
+                          ...blackPlacements.map(
+                            (placement) => Positioned(
+                              left: placement.left,
+                              top: 0,
+                              child: RepaintBoundary(
+                                child: _BlackKey(
+                                  note: placement.note,
+                                  width: blackKeyWidth,
+                                  height: blackKeyHeight,
+                                  highlightedNoteListenable:
+                                      _highlightedNoteNotifier,
+                                  isPlayingTeacherSequenceListenable:
+                                      _isPlayingTeacherSequenceNotifier,
                                 ),
                               ),
-                              _PressedOverlayLayer(
-                                pressedNoteIdsListenable: _pressedNoteIdsNotifier,
-                                visibleWhiteNotes: visibleWhiteNotes,
-                                blackPlacements: blackPlacements,
-                                whiteKeyWidth: whiteKeyWidth,
-                                whiteKeyHeight: whiteKeyHeight,
-                                blackKeyWidth: blackKeyWidth,
-                                blackKeyHeight: blackKeyHeight,
-                              ),
-                            ],
+                            ),
                           ),
-                        ),
+                          _PressedOverlayLayer(
+                            pressedNoteIdsListenable: _pressedNoteIdsNotifier,
+                            visibleWhiteNotes: visibleWhiteNotes,
+                            blackPlacements: blackPlacements,
+                            whiteKeyWidth: whiteKeyWidth,
+                            whiteKeyHeight: whiteKeyHeight,
+                            blackKeyWidth: blackKeyWidth,
+                            blackKeyHeight: blackKeyHeight,
+                          ),
+                        ],
                       ),
                     ),
-                  );
-                },
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: _MiniKeyboardNavigator(
+                scrollValue: _scrollValue,
+                viewportFraction: miniViewportFraction,
+                onChanged: _jumpToScrollFraction,
+                onStepLeft: () => _stepMiniScroll(-1, miniViewportFraction),
+                onStepRight: () => _stepMiniScroll(1, miniViewportFraction),
               ),
             ),
           ],
@@ -1375,6 +1587,203 @@ class _PressedOverlayLayer extends StatelessWidget {
       ),
     );
   }
+}
+
+
+class _MiniKeyboardNavigator extends StatelessWidget {
+  final double scrollValue;
+  final double viewportFraction;
+  final ValueChanged<double> onChanged;
+  final VoidCallback onStepLeft;
+  final VoidCallback onStepRight;
+
+  const _MiniKeyboardNavigator({
+    required this.scrollValue,
+    required this.viewportFraction,
+    required this.onChanged,
+    required this.onStepLeft,
+    required this.onStepRight,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 74,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black26,
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          _MiniNavButton(
+            icon: Icons.chevron_left,
+            onTap: onStepLeft,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final trackWidth = constraints.maxWidth;
+                final thumbWidth = (trackWidth * viewportFraction)
+                    .clamp(26.0, trackWidth)
+                    .toDouble();
+                final left = trackWidth <= thumbWidth
+                    ? 0.0
+                    : (trackWidth - thumbWidth) * scrollValue;
+
+                double fractionFromDx(double dx) {
+                  if (trackWidth <= thumbWidth) return 0.0;
+                  final next = (dx - (thumbWidth / 2)) / (trackWidth - thumbWidth);
+                  return next.clamp(0.0, 1.0);
+                }
+
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTapDown: (details) => onChanged(fractionFromDx(details.localPosition.dx)),
+                  onHorizontalDragUpdate: (details) =>
+                      onChanged(fractionFromDx(details.localPosition.dx)),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Positioned.fill(
+                        child: CustomPaint(
+                          painter: _MiniKeyboardStripPainter(),
+                        ),
+                      ),
+                      Positioned(
+                        left: left,
+                        top: 0,
+                        bottom: 0,
+                        child: IgnorePointer(
+                          child: Container(
+                            width: thumbWidth,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              color: Colors.blueAccent.withOpacity(0.14),
+                              border: Border.all(
+                                color: Colors.white.withOpacity(0.95),
+                                width: 2,
+                              ),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Colors.white24,
+                                  blurRadius: 4,
+                                  offset: Offset(0, 1),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
+          _MiniNavButton(
+            icon: Icons.chevron_right,
+            onTap: onStepRight,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniNavButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _MiniNavButton({
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: SizedBox(
+          width: 40,
+          height: 40,
+          child: Icon(icon, color: Colors.white, size: 26),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniKeyboardStripPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rrect = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      const Radius.circular(12),
+    );
+    final clipPath = Path()..addRRect(rrect);
+    canvas.save();
+    canvas.clipPath(clipPath);
+
+    final bgPaint = Paint()..color = const Color(0xFF2A2A2A);
+    canvas.drawRRect(rrect, bgPaint);
+
+    const totalWhiteKeys = 52;
+    final whiteKeyWidth = size.width / totalWhiteKeys;
+    final whitePaint = Paint()..color = const Color(0xFFF4F4F1);
+    final whiteLinePaint = Paint()
+      ..color = Colors.black26
+      ..strokeWidth = 0.7;
+
+    for (int i = 0; i < totalWhiteKeys; i++) {
+      final left = i * whiteKeyWidth;
+      final rect = Rect.fromLTWH(left, 0, whiteKeyWidth, size.height);
+      canvas.drawRect(rect, whitePaint);
+      canvas.drawLine(
+        Offset(left, 0),
+        Offset(left, size.height),
+        whiteLinePaint,
+      );
+    }
+    canvas.drawLine(
+      Offset(size.width, 0),
+      Offset(size.width, size.height),
+      whiteLinePaint,
+    );
+
+    final blackPaint = Paint()..color = Colors.black;
+    const pattern = [true, true, false, true, true, true, false];
+    final blackWidth = whiteKeyWidth * 0.62;
+    final blackHeight = size.height * 0.58;
+
+    for (int i = 0; i < totalWhiteKeys - 1; i++) {
+      if (!pattern[i % 7]) continue;
+      final left = ((i + 1) * whiteKeyWidth) - (blackWidth / 2);
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(left, 0, blackWidth, blackHeight),
+        const Radius.circular(2),
+      );
+      canvas.drawRRect(rect, blackPaint);
+    }
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _WhiteKey extends StatelessWidget {

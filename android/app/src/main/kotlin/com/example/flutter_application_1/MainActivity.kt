@@ -21,6 +21,7 @@ class MainActivity : FlutterActivity() {
 
     external fun nativeInit(sf2AssetPath: String): Boolean
     external fun nativeNoteOn(midi: Int, velocity: Int)
+    external fun nativeNoteOnMany(midis: IntArray, velocity: Int)
     external fun nativeNoteOff(midi: Int)
     external fun nativeAllNotesOff()
     external fun nativeRelease()
@@ -73,6 +74,18 @@ class MainActivity : FlutterActivity() {
                             result.error("NOTE_ON_ERROR", "Missing midi or velocity", null)
                         } else {
                             nativeNoteOn(midi, velocity)
+                            result.success(null)
+                        }
+                    }
+
+                    "noteOnMany" -> {
+                        val midis = call.argument<List<Int>>("midis")
+                        val velocity = call.argument<Int>("velocity")
+
+                        if (midis == null || velocity == null) {
+                            result.error("NOTE_ON_MANY_ERROR", "Missing midis or velocity", null)
+                        } else {
+                            nativeNoteOnMany(midis.toIntArray(), velocity)
                             result.success(null)
                         }
                     }
