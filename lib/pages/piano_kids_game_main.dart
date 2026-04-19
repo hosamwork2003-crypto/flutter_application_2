@@ -1,7 +1,7 @@
-
 import 'package:flutter/material.dart';
-import 'package:flutter_midi_pro/flutter_midi_pro.dart';
-
+import 'package:flutter_application_1/native_piano.dart';
+import '../services/api_client.dart';
+import '../services/piano_api.dart';
 class PianoNote {
   final String noteName;
   final int octave;
@@ -46,11 +46,12 @@ class KidsPianoGame extends StatefulWidget {
 }
 
 class _KidsPianoGameState extends State<KidsPianoGame> {
+    final ApiClient _apiClient = ApiClient('http://192.168.1.114:3000');
+  late final PianoApi _pianoApi = PianoApi(_apiClient);
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey _pianoAreaKey = GlobalKey();
   final ScrollController _scrollController = ScrollController();
-
-  final MidiPro _midi = MidiPro();
+  final Set<int> _triggeredPointers = <int>{};
   bool _audioReady = false;
   bool _isWarmingUp = false;
 
@@ -58,40 +59,73 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
 
   PianoNote? _currentNote;
   PianoNote? _highlightedNote;
-  String? _pressedNoteId;
 
   int _score = 0;
   int _stars = 0;
   String _message = 'بيانو حر: اضغط على أي مفتاح';
-  String _playerName = 'Player 1';
+  String _playerName = '';
   int _visibleKeyCount = 18;
 
   int _gameState = 0;
   bool _isPlayingTeacherSequence = false;
 
-  bool _isFingerDown = false;
-  bool _isPianoTouchActive = false;
-  String? _lastPlayedKey;
-
+  final Map<int, PianoNote> _pointerToNote = <int, PianoNote>{};
+  final Set<String> _pressedNoteIds = <String>{};
   final List<PianoNote> _teacherSequence = [];
   final List<PianoNote> _childSequence = [];
-
   final List<int> _activeNotes = [];
-  static const int _maxSimultaneousNotes = 6;
-  static const int _defaultVelocity = 127;
+  final Set<int> _soundingMidiNotes = <int>{};
 
-  @override
+  static const int _maxSimultaneousNotes = 32; // أو 64 لو الجهاز قوي
+  static const int _defaultVelocity = 127;
+  static const String _sf2AssetPath = 'assets/soundfonts/SalC5Light2.sf2';
+
+    @override
   void initState() {
     super.initState();
     _allNotes = _buildAvailableNotes();
     _initMidiEngine();
+    _loadPianoProfile();
   }
 
   @override
-  void dispose() {
-    _stopAllActiveNotes();
-    _scrollController.dispose();
-    super.dispose();
+void dispose() {
+  _stopAllActiveNotes();
+
+  // 👇 أهم سطر جديد
+  NativePiano.release();  // أو methodChannel.invokeMethod('release')
+
+  _scrollController.dispose();
+  super.dispose();
+}
+
+  Future<void> _loadPianoProfile() async {
+    try {
+      final data = await _pianoApi.getState();
+
+      if (!mounted) return;
+
+      setState(() {
+        _playerName = (data['player_name'] ?? '').toString();
+        _stars = (data['stars'] ?? 0) as int;
+        _score = (data['score'] ?? 0) as int;
+      });
+    } catch (e) {
+      debugPrint('load piano profile error: $e');
+    }
+  }
+
+    Future<void> _savePianoProfile() async {
+    try {
+      await _pianoApi.saveState(
+        stars: _stars,
+        score: _score,
+        lastMode: _gameState,
+        teacherSequenceLength: _teacherSequence.length,
+      );
+    } catch (e) {
+      debugPrint('save piano profile error: $e');
+    }
   }
 
   Future<void> _initMidiEngine() async {
@@ -104,26 +138,16 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     });
 
     try {
-      await _midi.loadSoundfont(
-        sf2Path: 'assets/soundfonts/export.sf2',
-        instrumentIndex: 0,
-      );
-
-      // Warm-up: تشغيل نغمة شبه صامتة مرة واحدة لتجهيز محرك الصوت
-      // وتقليل التعليق في أول ضغطة حقيقية.
-      _midi.playMidiNote(midi: 60, velocity: 1);
-      await Future.delayed(const Duration(milliseconds: 45));
-      _midi.stopMidiNote(midi: 60);
-      await Future.delayed(const Duration(milliseconds: 10));
+      final ok = await NativePiano.init(_sf2AssetPath);
 
       if (!mounted) return;
       setState(() {
-        _audioReady = true;
+        _audioReady = ok;
         _isWarmingUp = false;
-        _message = 'بيانو حر: اضغط على أي مفتاح';
+        _message = ok ? 'بيانو حر: اضغط على أي مفتاح' : 'تعذر تجهيز صوت البيانو';
       });
     } catch (e) {
-      debugPrint('MIDI init error: $e');
+      debugPrint('Native piano init error: $e');
 
       if (!mounted) return;
       setState(() {
@@ -169,83 +193,91 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     return notes;
   }
 
-  void _playNoteSound(PianoNote note, {int velocity = _defaultVelocity}) {
-    if (!_audioReady) return;
+void _playOneShotNote(PianoNote note, {int velocity = _defaultVelocity}) {
+  if (!_audioReady) return;
 
-    final safeVelocity = velocity.clamp(1, 127);
+  final safeVelocity = velocity.clamp(1, 127);
 
-    _activeNotes.remove(note.midiNumber);
+  NativePiano.noteOn(note.midiNumber, velocity: safeVelocity);
 
-    if (_activeNotes.length >= _maxSimultaneousNotes) {
-      final oldest = _activeNotes.removeAt(0);
-      _midi.stopMidiNote(midi: oldest);
-    }
+  Future.delayed(const Duration(milliseconds: 220), () {
+    NativePiano.noteOff(note.midiNumber);
+  });
+}
 
-    _midi.playMidiNote(midi: note.midiNumber, velocity: safeVelocity);
-    _activeNotes.add(note.midiNumber);
+void _playNoteSound(PianoNote note, {int velocity = _defaultVelocity}) {
+  if (!_audioReady) return;
+
+  final safeVelocity = velocity.clamp(1, 127);
+
+  // لو النغمة شغالة بالفعل، متشغلهاش مرة ثانية
+  if (_soundingMidiNotes.contains(note.midiNumber)) {
+    return;
   }
 
-  void _stopNoteSound(PianoNote note) {
-    if (!_audioReady) return;
-    _midi.stopMidiNote(midi: note.midiNumber);
-    _activeNotes.remove(note.midiNumber);
+  if (_activeNotes.length >= _maxSimultaneousNotes) {
+    final oldest = _activeNotes.removeAt(0);
+    _soundingMidiNotes.remove(oldest);
+    NativePiano.noteOff(oldest);
   }
 
-  void _stopAllActiveNotes() {
-    if (!_audioReady) return;
-    for (final midi in List<int>.from(_activeNotes)) {
-      _midi.stopMidiNote(midi: midi);
-    }
-    _activeNotes.clear();
+  NativePiano.noteOn(note.midiNumber, velocity: safeVelocity);
+  _activeNotes.add(note.midiNumber);
+  _soundingMidiNotes.add(note.midiNumber);
+}
+
+void _stopNoteSound(PianoNote note) {
+  if (!_audioReady) return;
+
+  if (!_soundingMidiNotes.contains(note.midiNumber)) {
+    return;
   }
+
+  NativePiano.noteOff(note.midiNumber);
+  _activeNotes.remove(note.midiNumber);
+  _soundingMidiNotes.remove(note.midiNumber);
+}
+
+void _stopAllActiveNotes() {
+  if (!_audioReady) return;
+  NativePiano.allNotesOff();
+  _activeNotes.clear();
+  _soundingMidiNotes.clear();
+}
 
   void _playNote(PianoNote note) {
     if (!_audioReady || _isWarmingUp) return;
-    if (_lastPlayedKey == note.noteId) return;
-    _lastPlayedKey = note.noteId;
-
-    final previousNote = _currentNote;
-
-    if (previousNote != null &&
-        previousNote.noteId != note.noteId &&
-        !_isPlayingTeacherSequence) {
-      _stopNoteSound(previousNote);
-    }
 
     _playNoteSound(note);
 
     if (!mounted) return;
 
-    String nextMessage = _message;
-    bool shouldShowWrongSnack = false;
-    bool shouldShowMissingTeacherSnack = false;
-    bool shouldShowCorrectSnack = false;
-    bool shouldShowSuccessSnack = false;
-    int earned = 0;
-
     if (_isPlayingTeacherSequence) {
-      setState(() {
-        _currentNote = note;
-        _pressedNoteId = note.noteId;
-      });
+      if (_currentNote?.noteId != note.noteId) {
+        setState(() {
+          _currentNote = note;
+        });
+      }
       return;
     }
 
     if (_gameState == 0) {
-      nextMessage = 'بيانو حر: ${note.arabicName}';
+      final nextMessage = 'بيانو حر: ${note.arabicName}';
+      final needsUiUpdate =
+          _currentNote?.noteId != note.noteId || _message != nextMessage;
 
-      setState(() {
-        _currentNote = note;
-        _pressedNoteId = note.noteId;
-        _message = nextMessage;
-      });
+      if (needsUiUpdate) {
+        setState(() {
+          _currentNote = note;
+          _message = nextMessage;
+        });
+      }
       return;
     }
 
     if (_gameState == 1) {
       setState(() {
         _currentNote = note;
-        _pressedNoteId = note.noteId;
         _teacherSequence.add(note);
         _message = 'تم تسجيل ${note.arabicName} في تسلسل المعلّم';
       });
@@ -253,17 +285,11 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     }
 
     if (_teacherSequence.isEmpty) {
-      shouldShowMissingTeacherSnack = true;
-
       setState(() {
         _currentNote = note;
-        _pressedNoteId = note.noteId;
         _message = 'سجّل تسلسل المعلّم أولًا';
       });
-
-      if (shouldShowMissingTeacherSnack) {
-        _showSnack('لا يوجد تسلسل محفوظ بعد', Colors.orange);
-      }
+      _showSnack('لا يوجد تسلسل محفوظ بعد', Colors.orange);
       return;
     }
 
@@ -271,7 +297,6 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     if (expectedIndex >= _teacherSequence.length) {
       setState(() {
         _currentNote = note;
-        _pressedNoteId = note.noteId;
         _childSequence.clear();
       });
       return;
@@ -283,94 +308,85 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
         note.octave == expectedNote.octave;
 
     if (!isCorrect) {
-      shouldShowWrongSnack = true;
-
       setState(() {
         _currentNote = note;
-        _pressedNoteId = note.noteId;
         _childSequence.clear();
         _message = 'خطأ. ابدأ من أول التسلسل';
       });
-
-      if (shouldShowWrongSnack) {
-        _showSnack('خطأ. ابدأ من البداية', Colors.red);
-      }
+      _showSnack('خطأ. ابدأ من البداية', Colors.red);
       return;
     }
 
     final completedSequence =
         (_childSequence.length + 1) == _teacherSequence.length;
 
-    if (completedSequence) {
-      earned = _teacherSequence.length * 10;
-      shouldShowSuccessSnack = true;
+if (completedSequence) {
+  final earned = _teacherSequence.length * 10;
 
-      setState(() {
-        _currentNote = note;
-        _pressedNoteId = note.noteId;
-        _childSequence.clear();
-        _score += earned;
-        _stars += 1;
-        _message = 'أحسنت! الطفل نفذ التسلسل كاملًا';
-      });
+  _stopAllActiveNotes();
 
-      if (shouldShowSuccessSnack) {
-        _showSnack('ممتاز! +$earned نقطة ⭐', Colors.green);
-      }
-      return;
-    }
+  setState(() {
+    _currentNote = note;
+    _childSequence.clear();
+    _score += earned;
+    _stars += 1;
+    _gameState = 0;
+    _teacherSequence.clear();
+    _highlightedNote = null;
+    _message = 'أحسنت! انتهى التحدي بنجاح';
+  });
 
-    shouldShowCorrectSnack = true;
+  _savePianoProfile();
+
+  _showSnack('ممتاز! +$earned نقطة ⭐', Colors.green);
+  return;
+}
 
     setState(() {
       _currentNote = note;
-      _pressedNoteId = note.noteId;
       _childSequence.add(note);
       _message = 'صحيح! أكمل باقي التسلسل';
     });
 
-    if (shouldShowCorrectSnack) {
-      _showSnack('صحيح، أكمل', Colors.green);
-    }
+    _showSnack('صحيح، أكمل', Colors.green);
   }
 
-  Future<void> _playTeacherSequence() async {
-    if (_teacherSequence.isEmpty || _isPlayingTeacherSequence) return;
+Future<void> _playTeacherSequence() async {
+  if (_teacherSequence.isEmpty || _isPlayingTeacherSequence) return;
 
-    _stopAllActiveNotes();
+  _stopAllActiveNotes();
 
-    setState(() {
-      _isPlayingTeacherSequence = true;
-      _message = 'استمع لتسلسل المعلّم';
-      _highlightedNote = null;
-      _pressedNoteId = null;
-    });
+  setState(() {
+    _isPlayingTeacherSequence = true;
+    _message = 'استمع لتسلسل المعلّم';
+    _highlightedNote = null;
+    _pressedNoteIds.clear();
+    _pointerToNote.clear();
+  });
 
-    for (final note in _teacherSequence) {
-      if (!mounted) return;
-
-      setState(() {
-        _highlightedNote = note;
-        _pressedNoteId = note.noteId;
-      });
-
-      _playNoteSound(note, velocity: 127);
-      await Future.delayed(const Duration(milliseconds: 320));
-      _stopNoteSound(note);
-      await Future.delayed(const Duration(milliseconds: 50));
-    }
-
+  for (final note in _teacherSequence) {
     if (!mounted) return;
 
     setState(() {
-      _highlightedNote = null;
-      _pressedNoteId = null;
-      _isPlayingTeacherSequence = false;
-      _message = _gameState == 2
-          ? 'الآن دور الطفل: كرر نفس التسلسل'
-          : 'انتهى تشغيل تسلسل المعلّم';
+      _highlightedNote = note;
     });
+
+    _playNoteSound(note, velocity: 127);
+    await Future.delayed(const Duration(milliseconds: 320));
+    _stopNoteSound(note);
+    await Future.delayed(const Duration(milliseconds: 60));
   }
+
+  if (!mounted) return;
+
+  setState(() {
+    _highlightedNote = null;
+    _isPlayingTeacherSequence = false;
+    _message = _gameState == 2
+        ? 'الآن دور الطفل: كرر نفس التسلسل'
+        : 'انتهى تشغيل تسلسل المعلّم';
+  });
+}
 
   void _showSnack(String text, Color color) {
     if (!mounted) return;
@@ -420,7 +436,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
       _teacherSequence.clear();
       _childSequence.clear();
       _highlightedNote = null;
-      _pressedNoteId = null;
+      _currentNote = null;
       _message = 'بيانو حر: اضغط على أي مفتاح';
     });
   }
@@ -548,145 +564,223 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
     return null;
   }
 
-  void _handlePointerDown({
-    required PointerDownEvent event,
-    required List<PianoNote> visibleNotes,
-    required List<PianoNote> visibleWhiteNotes,
-    required double whiteKeyWidth,
-    required double whiteKeyHeight,
-    required double blackKeyWidth,
-    required double blackKeyHeight,
-  }) {
-    _isFingerDown = true;
+  void _assignPointerToNote(int pointer, PianoNote note) {
+    final previous = _pointerToNote[pointer];
+    if (previous?.noteId == note.noteId) {
+      return;
+    }
 
-    final note = _findNoteAtPosition(
-      globalPosition: event.position,
-      visibleNotes: visibleNotes,
-      visibleWhiteNotes: visibleWhiteNotes,
-      whiteKeyWidth: whiteKeyWidth,
-      whiteKeyHeight: whiteKeyHeight,
-      blackKeyWidth: blackKeyWidth,
-      blackKeyHeight: blackKeyHeight,
-    );
+    if (previous != null) {
+      _stopNoteSound(previous);
+      _pressedNoteIds.remove(previous.noteId);
+    }
 
-    if (note != null) {
-      _isPianoTouchActive = true;
-      _playNote(note);
-    } else {
-      _isPianoTouchActive = false;
-      _lastPlayedKey = null;
+    _pointerToNote[pointer] = note;
+    _pressedNoteIds.add(note.noteId);
+    _playNote(note);
 
-      setState(() {
-        _pressedNoteId = null;
-      });
+    if (mounted) {    }
+  }
+
+  void _releasePointer(int pointer) {
+    final previous = _pointerToNote.remove(pointer);
+    if (previous != null) {
+      _stopNoteSound(previous);
+      _pressedNoteIds.remove(previous.noteId);
+      if (_currentNote?.noteId == previous.noteId) {
+        _currentNote = null;
+      }
+      if (mounted) {      }
     }
   }
 
-  void _handlePointerMove({
-    required PointerMoveEvent event,
-    required List<PianoNote> visibleNotes,
-    required List<PianoNote> visibleWhiteNotes,
-    required double whiteKeyWidth,
-    required double whiteKeyHeight,
-    required double blackKeyWidth,
-    required double blackKeyHeight,
-  }) {
-    if (!_isFingerDown || !_isPianoTouchActive) return;
+void _handlePointerDown({
+  required PointerDownEvent event,
+  required List<PianoNote> visibleNotes,
+  required List<PianoNote> visibleWhiteNotes,
+  required double whiteKeyWidth,
+  required double whiteKeyHeight,
+  required double blackKeyWidth,
+  required double blackKeyHeight,
+}) {
+  final note = _findNoteAtPosition(
+    globalPosition: event.position,
+    visibleNotes: visibleNotes,
+    visibleWhiteNotes: visibleWhiteNotes,
+    whiteKeyWidth: whiteKeyWidth,
+    whiteKeyHeight: whiteKeyHeight,
+    blackKeyWidth: blackKeyWidth,
+    blackKeyHeight: blackKeyHeight,
+  );
 
-    final note = _findNoteAtPosition(
-      globalPosition: event.position,
-      visibleNotes: visibleNotes,
-      visibleWhiteNotes: visibleWhiteNotes,
-      whiteKeyWidth: whiteKeyWidth,
-      whiteKeyHeight: whiteKeyHeight,
-      blackKeyWidth: blackKeyWidth,
-      blackKeyHeight: blackKeyHeight,
-    );
+  if (note == null) return;
 
-    if (note != null) {
-      _playNote(note);
-    } else {
-      _lastPlayedKey = null;
+  // 🎹 الوضع الحر (ONE SHOT)
+  if (_gameState == 0) {
+    if (_pointerToNote.containsKey(event.pointer)) return;
 
+    _pointerToNote[event.pointer] = note;
+    _pressedNoteIds.add(note.noteId);
+
+    _playOneShotNote(note); // 🔥 أهم تعديل
+
+    if (mounted) {
       setState(() {
-        _pressedNoteId = null;
+        _currentNote = note;
+        _message = 'بيانو حر: ${note.arabicName}';
+      });
+    }
+    return;
+  }
+
+  // باقي الأوضاع
+  _pointerToNote[event.pointer] = note;
+  _pressedNoteIds.add(note.noteId);
+  _playNote(note);
+
+  if (!mounted) return;
+  setState(() {
+    _currentNote = note;
+  });
+}
+
+
+void _handlePointerMove({
+  required PointerMoveEvent event,
+  required List<PianoNote> visibleNotes,
+  required List<PianoNote> visibleWhiteNotes,
+  required double whiteKeyWidth,
+  required double whiteKeyHeight,
+  required double blackKeyWidth,
+  required double blackKeyHeight,
+}) {
+  final newNote = _findNoteAtPosition(
+    globalPosition: event.position,
+    visibleNotes: visibleNotes,
+    visibleWhiteNotes: visibleWhiteNotes,
+    whiteKeyWidth: whiteKeyWidth,
+    whiteKeyHeight: whiteKeyHeight,
+    blackKeyWidth: blackKeyWidth,
+    blackKeyHeight: blackKeyHeight,
+  );
+
+  final previousNote = _pointerToNote[event.pointer];
+
+  if (previousNote != null &&
+      newNote != null &&
+      previousNote.noteId == newNote.noteId) {
+    return;
+  }
+
+  if (previousNote != null && newNote == null) {
+    _stopNoteSound(previousNote);
+    _pressedNoteIds.remove(previousNote.noteId);
+    _pointerToNote.remove(event.pointer);
+    return;
+  }
+
+  if (newNote != null) {
+    if (previousNote != null) {
+      _stopNoteSound(previousNote);
+      _pressedNoteIds.remove(previousNote.noteId);
+    }
+
+    _pointerToNote[event.pointer] = newNote;
+    _pressedNoteIds.add(newNote.noteId);
+
+    _playNote(newNote); // 🔥 بدل playNoteSound
+
+    if (mounted) {
+      setState(() {
+        _currentNote = newNote;
       });
     }
   }
+}
 
- void _handlePointerEnd() {
-  _isFingerDown = false;
-  _isPianoTouchActive = false;
-  _lastPlayedKey = null;
+void _handlePointerEnd(PointerEvent event) {
+  final note = _pointerToNote.remove(event.pointer);
+
+  if (note != null) {
+    _pressedNoteIds.remove(note.noteId);
+
+    // 🔥 أوقف في كل الأوضاع ما عدا البيانو الحر
+    if (_gameState != 0 && !_isPlayingTeacherSequence) {
+      _stopNoteSound(note);
+    }
+  }
 
   if (!mounted) return;
 
   setState(() {
-    _pressedNoteId = null;
+    if (_pointerToNote.isEmpty) {
+      _currentNote = null;
+    }
   });
 }
 
-  List<Widget> _buildBlackKeyOverlays({
-    required List<PianoNote> visibleWhiteNotes,
-    required List<PianoNote> visibleNotes,
-    required double whiteKeyWidth,
-    required double blackKeyWidth,
-    required double blackKeyHeight,
-  }) {
-    final widgets = <Widget>[];
+List<Widget> _buildBlackKeyOverlays({
+  required List<PianoNote> visibleWhiteNotes,
+  required List<PianoNote> visibleNotes,
+  required double whiteKeyWidth,
+  required double blackKeyWidth,
+  required double blackKeyHeight,
+}) {
+  final widgets = <Widget>[];
 
-    final baseWidth =
-        (visibleWhiteNotes.length * whiteKeyWidth) +
-        ((visibleWhiteNotes.length - 1) * 4);
+  final baseWidth =
+      (visibleWhiteNotes.length * whiteKeyWidth) +
+      ((visibleWhiteNotes.length - 1) * 4);
 
-    for (int whiteIndex = 0; whiteIndex < visibleWhiteNotes.length; whiteIndex++) {
-      final whiteNote = visibleWhiteNotes[whiteIndex];
+  for (int whiteIndex = 0; whiteIndex < visibleWhiteNotes.length; whiteIndex++) {
+    final whiteNote = visibleWhiteNotes[whiteIndex];
 
-      if (whiteNote.noteName == 'E' || whiteNote.noteName == 'B') {
-        continue;
-      }
-
-      final currentIndex = visibleNotes.indexOf(whiteNote);
-      PianoNote? blackAfter;
-
-      for (int i = currentIndex + 1; i < visibleNotes.length; i++) {
-        if (visibleNotes[i].isBlack) {
-          blackAfter = visibleNotes[i];
-          break;
-        }
-        if (!visibleNotes[i].isBlack) {
-          break;
-        }
-      }
-
-      if (blackAfter == null) continue;
-
-      double left =
-          (whiteIndex * (whiteKeyWidth + 4)) + whiteKeyWidth - (blackKeyWidth / 2);
-
-      final maxLeft = baseWidth - blackKeyWidth;
-      if (left > maxLeft) {
-        left = maxLeft;
-      }
-
-      widgets.add(
-        Positioned(
-          left: left,
-          top: 0,
-          child: _BlackKey(
-            note: blackAfter,
-            width: blackKeyWidth,
-            height: blackKeyHeight,
-            isHighlighted: _highlightedNote?.noteId == blackAfter.noteId,
-            isPressed: !_isPlayingTeacherSequence && _pressedNoteId == blackAfter.noteId,
-            isTeacherDemo: _isTeacherDemoKey(blackAfter),
-          ),
-        ),
-      );
+    if (whiteNote.noteName == 'E' || whiteNote.noteName == 'B') {
+      continue;
     }
 
-    return widgets;
+    final currentIndex = visibleNotes.indexOf(whiteNote);
+    PianoNote? blackAfter;
+
+    for (int i = currentIndex + 1; i < visibleNotes.length; i++) {
+      if (visibleNotes[i].isBlack) {
+        blackAfter = visibleNotes[i];
+        break;
+      }
+      if (!visibleNotes[i].isBlack) {
+        break;
+      }
+    }
+
+    if (blackAfter == null) continue;
+
+    double left =
+        (whiteIndex * (whiteKeyWidth + 4)) + whiteKeyWidth - (blackKeyWidth / 2);
+
+    final maxLeft = baseWidth - blackKeyWidth;
+    if (left > maxLeft) {
+      left = maxLeft;
+    }
+
+    widgets.add(
+      Positioned(
+        left: left,
+        top: 0,
+        child: _BlackKey(
+          note: blackAfter,
+          width: blackKeyWidth,
+          height: blackKeyHeight,
+          isHighlighted: _highlightedNote?.noteId == blackAfter.noteId,
+          isPressed: !_isPlayingTeacherSequence &&
+              _pressedNoteIds.contains(blackAfter.noteId),
+          isTeacherDemo: _isTeacherDemoKey(blackAfter),
+        ),
+      ),
+    );
   }
+
+  return widgets;
+}
 
   @override
   Widget build(BuildContext context) {
@@ -741,43 +835,11 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                   ],
                 ),
               ),
-              ListTile(
-                leading: const Icon(Icons.person),
-                title: const Text('اسم اللاعب'),
-                subtitle: Text(_playerName),
-                onTap: () async {
-                  final controller = TextEditingController(text: _playerName);
-
-                  final result = await showDialog<String>(
-                    context: context,
-                    builder: (context) => AlertDialog(
-                      title: const Text('اسم اللاعب'),
-                      content: TextField(
-                        controller: controller,
-                        decoration: const InputDecoration(
-                          hintText: 'اكتب اسم اللاعب',
-                        ),
-                      ),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(context),
-                          child: const Text('إلغاء'),
-                        ),
-                        ElevatedButton(
-                          onPressed: () => Navigator.pop(context, controller.text.trim()),
-                          child: const Text('حفظ'),
-                        ),
-                      ],
-                    ),
-                  );
-
-                  if (result != null && result.isNotEmpty) {
-                    setState(() {
-                      _playerName = result;
-                    });
-                  }
-                },
-              ),
+ListTile(
+  leading: const Icon(Icons.person),
+  title: const Text('اسم اللاعب'),
+  subtitle: Text(_playerName.isEmpty ? 'جارٍ تحميل الاسم...' : _playerName),
+),
               const ListTile(
                 leading: Icon(Icons.info_outline),
                 title: Text('تفاصيل اللعبة'),
@@ -918,20 +980,21 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                           icon: const Icon(Icons.volume_up),
                           label: const Text('اسمع تسلسل المعلّم'),
                         ),
-                        OutlinedButton.icon(
-                          onPressed: () {
-                            _stopAllActiveNotes();
-                            setState(() {
-                              _score = 0;
-                              _stars = 0;
-                              _teacherSequence.clear();
-                              _childSequence.clear();
-                              _gameState = 0;
-                              _highlightedNote = null;
-                              _pressedNoteId = null;
-                              _message = 'تمت إعادة التعيين';
-                            });
-                          },
+OutlinedButton.icon(
+  onPressed: () {
+    _stopAllActiveNotes();
+    setState(() {
+      _score = 0;
+      _stars = 0;
+      _teacherSequence.clear();
+      _childSequence.clear();
+      _gameState = 0;
+      _highlightedNote = null;
+      _currentNote = null;
+      _message = 'تمت إعادة التعيين';
+    });
+    _savePianoProfile();
+  },
                           icon: const Icon(Icons.refresh),
                           label: const Text('إعادة'),
                         ),
@@ -944,7 +1007,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
             Expanded(
               child: SingleChildScrollView(
                 controller: _scrollController,
-                physics: _isPianoTouchActive
+                physics: _pointerToNote.isNotEmpty
                     ? const NeverScrollableScrollPhysics()
                     : const BouncingScrollPhysics(),
                 scrollDirection: Axis.horizontal,
@@ -970,8 +1033,8 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                       blackKeyWidth: blackKeyWidth,
                       blackKeyHeight: blackKeyHeight,
                     ),
-                    onPointerUp: (_) => _handlePointerEnd(),
-                    onPointerCancel: (_) => _handlePointerEnd(),
+                    onPointerUp: _handlePointerEnd,
+                    onPointerCancel: _handlePointerEnd,
                     child: SizedBox(
                       key: _pianoAreaKey,
                       width: pianoWidth,
@@ -992,7 +1055,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
                                       height: whiteKeyHeight,
                                       isHighlighted: _highlightedNote?.noteId == note.noteId,
                                       isPressed: !_isPlayingTeacherSequence &&
-                                          _pressedNoteId == note.noteId,
+                                          _pressedNoteIds.contains(note.noteId),
                                       isTeacherDemo: _isTeacherDemoKey(note),
                                     ),
                                   ),

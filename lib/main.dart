@@ -12,20 +12,9 @@ class MyProfessionalApp extends StatefulWidget {
 
   static final AudioPlayer audioPlayer = AudioPlayer();
 
-  @override
-  State<MyProfessionalApp> createState() => _MyProfessionalAppState();
-}
-
-class _MyProfessionalAppState extends State<MyProfessionalApp> {
-  @override
-  void initState() {
-    super.initState();
-    _startBackgroundMusic();
-  }
-
-  Future<void> _startBackgroundMusic() async {
+  static Future<void> startBgMusic() async {
     try {
-      await MyProfessionalApp.audioPlayer.setAudioContext(
+      await audioPlayer.setAudioContext(
         AudioContext(
           android: AudioContextAndroid(
             isSpeakerphoneOn: true,
@@ -37,13 +26,44 @@ class _MyProfessionalAppState extends State<MyProfessionalApp> {
         ),
       );
 
-      await MyProfessionalApp.audioPlayer.setReleaseMode(ReleaseMode.loop);
-      await MyProfessionalApp.audioPlayer.play(
-        AssetSource('audio/welcome.mp3'),
-      );
+      await audioPlayer.setReleaseMode(ReleaseMode.loop);
+      await audioPlayer.play(AssetSource('audio/welcome.mp3'));
     } catch (e) {
-      debugPrint("Error music: $e");
+      debugPrint("Error starting music: $e");
     }
+  }
+
+  static Future<void> pauseBgMusic() async {
+    try {
+      await audioPlayer.pause();
+    } catch (e) {
+      debugPrint("Error pausing music: $e");
+    }
+  }
+
+  static Future<void> resumeBgMusic() async {
+    try {
+      await audioPlayer.resume();
+    } catch (e) {
+      debugPrint("Error resuming music: $e");
+    }
+  }
+
+  @override
+  State<MyProfessionalApp> createState() => _MyProfessionalAppState();
+}
+
+class _MyProfessionalAppState extends State<MyProfessionalApp> {
+  @override
+  void initState() {
+    super.initState();
+    MyProfessionalApp.startBgMusic();
+  }
+
+  @override
+  void dispose() {
+    MyProfessionalApp.audioPlayer.dispose();
+    super.dispose();
   }
 
   @override

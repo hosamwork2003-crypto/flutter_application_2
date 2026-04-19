@@ -77,13 +77,25 @@ class _MainPageState extends State<MainPage> {
     }
   }
 
-  void toggleSound() {
-    HapticFeedback.heavyImpact();
-    setState(() {
-      isMuted = !isMuted;
-      MyProfessionalApp.audioPlayer.setVolume(isMuted ? 0 : 1);
-    });
+Future<void> toggleSound() async {
+  HapticFeedback.heavyImpact();
+
+  final nextMuted = !isMuted;
+
+  setState(() {
+    isMuted = nextMuted;
+  });
+
+  try {
+    if (nextMuted) {
+      await MyProfessionalApp.pauseBgMusic();
+    } else {
+      await MyProfessionalApp.resumeBgMusic();
+    }
+  } catch (e) {
+    debugPrint("Toggle sound error: $e");
   }
+}
 
    _pushInstant(Widget page) async {
   await Navigator.of(context).push(NoAnimRoute(builder: (_) => page));
@@ -243,10 +255,10 @@ void _openProfileSheet() {
               style: TextStyle(color: Color.fromARGB(255, 110, 110, 110), fontSize: 12)),
         ],
       ),
-      onSelected: (val) {
-        if (val == 'mute') toggleSound();
-        if (val == 'page') _pushInstant(const SettingsTab());
-      },
+onSelected: (val) async {
+  if (val == 'mute') await toggleSound();
+  if (val == 'page') _pushInstant(const SettingsTab());
+},
       itemBuilder: (ctx) => [
         PopupMenuItem(
           value: 'mute',
