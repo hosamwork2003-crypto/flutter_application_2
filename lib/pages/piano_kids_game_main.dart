@@ -97,7 +97,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   bool _isDownChordBatchScheduled = false;
   int _visibleKeyCount = 18;
   int _noteStampSeed = 0;
-  double _scrollValue = 0.0;
+  late final ValueNotifier<double> _scrollValueNotifier;
 
   static const int _defaultVelocity = 127;
   static const int _downChordWindowMs = 28;
@@ -107,8 +107,7 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
   static const String _sf2AssetPath = 'assets/soundfonts/SalC5Light2.sf2';
 
   @override
-@override
-void initState() {
+  void initState() {
   super.initState();
 
   SystemChrome.setPreferredOrientations([
@@ -130,6 +129,7 @@ void initState() {
   _childSequenceLengthNotifier = ValueNotifier<int>(0);
   _gameStateNotifier = ValueNotifier<int>(0);
   _playerNameNotifier = ValueNotifier<String>('');
+  _scrollValueNotifier = ValueNotifier<double>(0.0);
 
   _scrollController.addListener(_syncScrollValue);
 
@@ -138,8 +138,7 @@ void initState() {
 }
 
   @override
-@override
-void dispose() {
+  void dispose() {
   _stopAllActiveNotes();
   NativePiano.release();
 
@@ -157,6 +156,7 @@ void dispose() {
   _childSequenceLengthNotifier.dispose();
   _gameStateNotifier.dispose();
   _playerNameNotifier.dispose();
+  _scrollValueNotifier.dispose();
 
   SystemChrome.setPreferredOrientations(DeviceOrientation.values);
 
@@ -298,10 +298,8 @@ void dispose() {
     final max = _scrollController.position.maxScrollExtent;
     final next =
         max <= 0 ? 0.0 : (_scrollController.offset / max).clamp(0.0, 1.0);
-    if ((_scrollValue - next).abs() > 0.001 && mounted) {
-      setState(() {
-        _scrollValue = next;
-      });
+    if ((_scrollValueNotifier.value - next).abs() > 0.001) {
+      _scrollValueNotifier.value = next;
     }
   }
 
@@ -319,16 +317,16 @@ void dispose() {
     final target = maxExtent * clamped;
     _scrollController.jumpTo(target);
 
-    if ((_scrollValue - clamped).abs() > 0.001 && mounted) {
-      setState(() {
-        _scrollValue = clamped;
-      });
+    if ((_scrollValueNotifier.value - clamped).abs() > 0.001) {
+      _scrollValueNotifier.value = clamped;
     }
   }
 
   void _stepMiniScroll(double direction, double viewportFraction) {
     final step = (1 - viewportFraction) * 0.18;
-    _jumpToScrollFraction((_scrollValue + (direction * step)).clamp(0.0, 1.0));
+    _jumpToScrollFraction(
+      (_scrollValueNotifier.value + (direction * step)).clamp(0.0, 1.0),
+    );
   }
 
   void _setPressedNote(String noteId, bool pressed) {
@@ -1202,7 +1200,8 @@ void dispose() {
               onReset: _resetGame,
             ),
             Expanded(
-              child: SingleChildScrollView(
+              child: RepaintBoundary(
+                child: SingleChildScrollView(
                 controller: _scrollController,
                 physics: const NeverScrollableScrollPhysics(),
                 scrollDirection: Axis.horizontal,
@@ -1293,12 +1292,13 @@ void dispose() {
                     ),
                   ),
                 ),
+                ),
               ),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
               child: _MiniKeyboardNavigator(
-                scrollValue: _scrollValue,
+                scrollValueListenable: _scrollValueNotifier,
                 viewportFraction: miniViewportFraction,
                 onChanged: _jumpToScrollFraction,
                 onStepLeft: () => _stepMiniScroll(-1, miniViewportFraction),
@@ -1591,14 +1591,14 @@ class _PressedOverlayLayer extends StatelessWidget {
 
 
 class _MiniKeyboardNavigator extends StatelessWidget {
-  final double scrollValue;
+  final ValueListenable<double> scrollValueListenable;
   final double viewportFraction;
   final ValueChanged<double> onChanged;
   final VoidCallback onStepLeft;
   final VoidCallback onStepRight;
 
   const _MiniKeyboardNavigator({
-    required this.scrollValue,
+    required this.scrollValueListenable,
     required this.viewportFraction,
     required this.onChanged,
     required this.onStepLeft,
@@ -1629,62 +1629,71 @@ class _MiniKeyboardNavigator extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final trackWidth = constraints.maxWidth;
-                final thumbWidth = (trackWidth * viewportFraction)
-                    .clamp(26.0, trackWidth)
-                    .toDouble();
-                final left = trackWidth <= thumbWidth
-                    ? 0.0
-                    : (trackWidth - thumbWidth) * scrollValue;
+            child: ValueListenableBuilder<double>(
+              valueListenable: scrollValueListenable,
+              builder: (context, scrollValue, _) {
+                return LayoutBuilder(
+                  builder: (context, constraints) {
+                    final trackWidth = constraints.maxWidth;
+                    final thumbWidth = (trackWidth * viewportFraction)
+                        .clamp(26.0, trackWidth)
+                        .toDouble();
+                    final left = trackWidth <= thumbWidth
+                        ? 0.0
+                        : (trackWidth - thumbWidth) * scrollValue;
 
-                double fractionFromDx(double dx) {
-                  if (trackWidth <= thumbWidth) return 0.0;
-                  final next = (dx - (thumbWidth / 2)) / (trackWidth - thumbWidth);
-                  return next.clamp(0.0, 1.0);
-                }
+                    double fractionFromDx(double dx) {
+                      if (trackWidth <= thumbWidth) return 0.0;
+                      final next =
+                          (dx - (thumbWidth / 2)) / (trackWidth - thumbWidth);
+                      return next.clamp(0.0, 1.0);
+                    }
 
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) => onChanged(fractionFromDx(details.localPosition.dx)),
-                  onHorizontalDragUpdate: (details) =>
-                      onChanged(fractionFromDx(details.localPosition.dx)),
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      Positioned.fill(
-                        child: CustomPaint(
-                          painter: _MiniKeyboardStripPainter(),
-                        ),
-                      ),
-                      Positioned(
-                        left: left,
-                        top: 0,
-                        bottom: 0,
-                        child: IgnorePointer(
-                          child: Container(
-                            width: thumbWidth,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(12),
-                              color: Colors.blueAccent.withOpacity(0.14),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.95),
-                                width: 2,
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTapDown: (details) =>
+                          onChanged(fractionFromDx(details.localPosition.dx)),
+                      onHorizontalDragUpdate: (details) =>
+                          onChanged(fractionFromDx(details.localPosition.dx)),
+                      child: RepaintBoundary(
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Positioned.fill(
+                              child: CustomPaint(
+                                painter: _MiniKeyboardStripPainter(),
                               ),
-                              boxShadow: const [
-                                BoxShadow(
-                                  color: Colors.white24,
-                                  blurRadius: 4,
-                                  offset: Offset(0, 1),
-                                ),
-                              ],
                             ),
-                          ),
+                            Positioned(
+                              left: left,
+                              top: 0,
+                              bottom: 0,
+                              child: IgnorePointer(
+                                child: Container(
+                                  width: thumbWidth,
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(12),
+                                    color: Colors.blueAccent.withOpacity(0.14),
+                                    border: Border.all(
+                                      color: Colors.white.withOpacity(0.95),
+                                      width: 2,
+                                    ),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Colors.white24,
+                                        blurRadius: 4,
+                                        offset: Offset(0, 1),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
+                    );
+                  },
                 );
               },
             ),
