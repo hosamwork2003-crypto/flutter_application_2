@@ -1,13 +1,13 @@
 // lib/pages/lessons.dart
 //
 // صفحة الدروس:
+// - تجيب الدروس ديناميكيًا من السيرفر حسب المادة
+// - أي درس جديد يترفع من صفحة الأدمن يظهر هنا أوتوماتيك
 // - تشغيل فيديو من السيرفر مع Cache + Resume + حفظ تقدم
 // - مفضلة + علامات (Bookmarks) داخل الفيديو
 // - شرطات حمراء لأسئلة Quiz من السيرفر
-// - إظهار السؤال عند وصول الوقت، ومنع تخطي السؤال بالـ Seek
-// - زر "إلغاء" يغلق الـ popup لكن يمنع استكمال الفيديو حتى الحل
-// - لو حاول يتخطى الشرطة (Seek/Play) يظهر السؤال فورًا
-// - لو ضغط إلغاء: الفيديو يقف (بدون تكرار popup تلقائي) لكن لو حاول يكمل تاني يظهر السؤال
+// - fallback لقراءة quiz marks من lessons.by-subject لو endpoint الخاص بها فشل
+// - إيقاف موسيقى الخلفية Pause أول ما تدخل الصفحة ثم إرجاعها عند الخروج
 
 import 'dart:async';
 
@@ -27,11 +27,13 @@ class LessonItem {
   final String id;
   final String title;
   final String videoUrl;
+  final List<Map<String, dynamic>> rawQuizMarks;
 
   LessonItem({
     required this.id,
     required this.title,
     required this.videoUrl,
+    required this.rawQuizMarks,
   });
 }
 
@@ -44,9 +46,9 @@ class VideoBookmark {
 }
 
 class QuizMark {
-  final int id; // id من جدول quiz_marks (أو marks)
-  final Duration at; // وقت ظهور السؤال داخل الفيديو
-  bool answered; // هل المستخدم جاوب عليه قبل كده؟
+  final int id;
+  final Duration at;
+  bool answered;
 
   QuizMark({
     required this.id,
@@ -55,7 +57,6 @@ class QuizMark {
   });
 }
 
-/// فلتر عرض الدروس داخل القائمة الجانبية
 enum LessonsFilter {
   all,
   favorites,
@@ -63,131 +64,153 @@ enum LessonsFilter {
 }
 
 class LessonsPage extends StatefulWidget {
-  const LessonsPage({super.key});
+  final String subject;
+  final String title;
+
+  const LessonsPage({
+    super.key,
+    required this.subject,
+    required this.title,
+  });
 
   @override
   State<LessonsPage> createState() => _LessonsPageState();
 }
 
 class _LessonsPageState extends State<LessonsPage> {
-  // =========================
-  // 0) API
-  // =========================
   static const String baseUrl = "http://192.168.1.114:3000";
-  late final LessonsApi lessonsApi = LessonsApi(ApiClient(baseUrl));
+  static const double _videoFrameAspectRatio = 16 / 9;
 
-  // =========================
-  // 1) الدروس (حاليًا ثابتة، لاحقًا ممكن تجيبها من السيرفر حسب academic_level)
-  // =========================
-  final List<LessonItem> lessons = [
-    LessonItem(id: "l1", title: "Lesson 1", videoUrl: "$baseUrl/uploads/videos/vid2_fast.mp4?v=1"),
-    LessonItem(id: "l2", title: "Lesson 2", videoUrl: "$baseUrl/uploads/videos/vid1_fast.mp4?v=1"),
-    LessonItem(id: "l3", title: "Lesson 3", videoUrl: "$baseUrl/uploads/videos/vid2_fast.mp4?v=1"),
-  ];
+  late final ApiClient apiClient = ApiClient(baseUrl);
+  late final LessonsApi lessonsApi = LessonsApi(apiClient);
 
+  List<LessonItem> lessons = [];
   int _index = 0;
 
-  // =========================
-  // 2) مشغل الفيديو
-  // =========================
   VideoPlayerController? _video;
   ChewieController? _chewie;
 
   bool _loading = true;
   String? _error;
 
-  // =========================
-  // 3) العرض
-  // =========================
   final double _videoWidthFactor = 0.82;
   bool _zoomed = false;
   double get _zoomScale => _zoomed ? 1.35 : 1.0;
 
-  // =========================
-  // 4) الوقت/التقدم (Resume + Progress)
-  // =========================
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   Timer? _tick;
 
-  // Resume من السيرفر (لكل درس)
   final Map<String, Duration> _lastPosByLessonId = {};
-
-  // Progress من السيرفر (لكل درس 0..1)
   final Map<String, double> _progressByLessonId = {};
-
-  // Favorites من السيرفر
   final Set<String> _favoriteLessons = {};
-
-  // Bookmarks من السيرفر (لكل درس)
   final Map<String, List<VideoBookmark>> _bookmarksByLessonId = {};
 
-  // =========================
-  // 4.5) Quiz Marks
-  // =========================
   List<QuizMark> _quizMarks = [];
-
-  // يمنع فتح أكثر من سؤال في نفس الوقت
   bool _quizDialogOpen = false;
-
-  // آخر سؤال فعّال لمنع التكرار داخل الـ tick
   int? _activeMarkId;
-
-  // آخر Position لمقارنة "تخطي/قفز"
   Duration _lastTickPos = Duration.zero;
-
-  // ✅ لو المستخدم ضغط "إلغاء" داخل السؤال
-  // نعمل Block: الفيديو يفضل مقفول لحد ما يجاوب على نفس السؤال
   int? _blockedMarkId;
-
-  // علشان مايحصلش popup spam بعد Cancel لو الفيديو واقف
   DateTime _lastBlockedPromptAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  // =========================
-  // 5) Sidebar
-  // =========================
   bool _sidebarOpen = true;
   static const double _sidebarWidth = 260;
-
-  // فلتر القائمة الجانبية
   LessonsFilter _filter = LessonsFilter.all;
 
-  // =========================
-  // 6) منع تداخل + تقليل الحفظ للسيرفر
-  // =========================
   bool _switching = false;
   Timer? _saveDebounce;
 
-  // =========================
-  // 7) موسيقى الخلفية
-  // =========================
-  bool _bgWasSilencedByMe = false;
-  double _bgVolumeBefore = 1.0;
+  bool _bgPausedByMe = false;
 
   @override
   void initState() {
     super.initState();
+    _pauseBackgroundMusicNow();
     _bootstrap();
   }
 
-  Future<void> _bootstrap() async {
-    // 1) state (resume/progress/fav)
-    await _loadServerState();
+  Future<void> _pauseBackgroundMusicNow() async {
+    try {
+      await MyProfessionalApp.pauseBgMusic();
+      _bgPausedByMe = true;
+    } catch (e) {
+      debugPrint("PAUSE BG MUSIC ERROR: $e");
+    }
+  }
 
-    // 2) bookmarks للدرس الحالي + prefetch للباقي (لفلتر "فيها علامات")
+  Future<void> _resumeBackgroundMusicIfNeeded() async {
+    if (!_bgPausedByMe) return;
+    try {
+      await MyProfessionalApp.resumeBgMusic();
+    } catch (e) {
+      debugPrint("RESUME BG MUSIC ERROR: $e");
+    }
+    _bgPausedByMe = false;
+  }
+
+  Future<void> _bootstrap() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    await _loadLessonsFromServer();
+
+    if (lessons.isEmpty) {
+      setState(() {
+        _loading = false;
+        _error = "لا توجد دروس لهذه المادة حالياً";
+      });
+      return;
+    }
+
+    if (_index >= lessons.length) {
+      _index = 0;
+    }
+
+    await _loadServerState();
     await _loadBookmarksForCurrent();
     _prefetchBookmarksInBackground();
-
-    // 3) quiz marks للدرس الحالي
     await _loadQuizMarksForCurrent();
-
-    // 4) تشغيل الفيديو
     await _loadVideo();
   }
 
-  // =========================
-  // تحميل state من السيرفر
-  // =========================
+  List<Map<String, dynamic>> _normalizeRawQuizMarks(dynamic raw) {
+    if (raw is! List) return const [];
+
+    final out = <Map<String, dynamic>>[];
+    for (final item in raw) {
+      if (item is Map) {
+        out.add(Map<String, dynamic>.from(item));
+      }
+    }
+    return out;
+  }
+
+  Future<void> _loadLessonsFromServer() async {
+    try {
+      final data = await apiClient.get('/lessons/by-subject/${widget.subject}');
+      final items = (data['items'] as List?) ?? const [];
+
+      lessons = items.map((item) {
+        final row = Map<String, dynamic>.from(item as Map);
+        return LessonItem(
+          id: (row['id'] ?? '').toString(),
+          title: (row['lesson_name'] ?? 'بدون عنوان').toString(),
+          videoUrl: (row['video_url'] ?? '').toString(),
+          rawQuizMarks: _normalizeRawQuizMarks(row['quiz_marks_json']),
+        );
+      }).where((l) => l.id.isNotEmpty && l.videoUrl.isNotEmpty).toList();
+
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint("LOAD LESSONS ERROR: $e");
+      lessons = [];
+      _error = "فشل تحميل الدروس";
+      if (mounted) setState(() {});
+    }
+  }
+
   Future<void> _loadServerState() async {
     try {
       final items = await lessonsApi.getState();
@@ -209,10 +232,8 @@ class _LessonsPageState extends State<LessonsPage> {
     }
   }
 
-  // =========================
-  // Bookmarks (للدرس الحالي)
-  // =========================
   Future<void> _loadBookmarksForCurrent() async {
+    if (lessons.isEmpty) return;
     final lessonId = lessons[_index].id;
     try {
       final rows = await lessonsApi.getBookmarks(lessonId);
@@ -232,7 +253,6 @@ class _LessonsPageState extends State<LessonsPage> {
     }
   }
 
-  // ✅ تحميل Bookmarks لباقي الدروس (يدعم فلتر Bookmarked)
   void _prefetchBookmarksInBackground() {
     Future(() async {
       for (final l in lessons) {
@@ -250,42 +270,74 @@ class _LessonsPageState extends State<LessonsPage> {
             ..sort((a, b) => a.at.compareTo(b.at));
 
           if (mounted) setState(() {});
-        } catch (_) {
-          // لو مش مسجل/توكن ناقص: طبيعي يفشل
-        }
+        } catch (_) {}
       }
     });
   }
 
-  // =========================
-  // Quiz Marks (للدرس الحالي)
-  // =========================
+  List<QuizMark> _fallbackQuizMarksFromLesson() {
+    if (lessons.isEmpty) return [];
+
+    final raw = lessons[_index].rawQuizMarks;
+    final out = <QuizMark>[];
+
+    for (final m in raw) {
+      final id = (m['mark_id'] as num?)?.toInt() ??
+          (m['id'] as num?)?.toInt() ??
+          -1;
+      final atMs = (m['at_ms'] as num?)?.toInt() ?? 0;
+      final active = m['active'] != false;
+
+      if (id <= 0 || atMs < 0 || !active) continue;
+
+      out.add(
+        QuizMark(
+          id: id,
+          at: Duration(milliseconds: atMs),
+          answered: false,
+        ),
+      );
+    }
+
+    out.sort((a, b) => a.at.compareTo(b.at));
+    return out;
+  }
+
   Future<void> _loadQuizMarksForCurrent() async {
+    if (lessons.isEmpty) return;
     final lessonId = lessons[_index].id;
+
     try {
       final rows = await lessonsApi.getQuizMarks(lessonId);
 
       _quizMarks = rows.map((r) {
+        final id = (r["id"] as num?)?.toInt() ??
+            (r["mark_id"] as num?)?.toInt() ??
+            -1;
+
         return QuizMark(
-          id: (r["id"] as num).toInt(),
+          id: id,
           at: Duration(milliseconds: (r["at_ms"] as num).toInt()),
           answered: (r["answered"] == true),
         );
-      }).toList()
+      }).where((m) => m.id > 0).toList()
         ..sort((a, b) => a.at.compareTo(b.at));
+
+      if (_quizMarks.isEmpty) {
+        _quizMarks = _fallbackQuizMarksFromLesson();
+      }
 
       if (mounted) setState(() {});
     } catch (e) {
       debugPrint("LOAD QUIZ MARKS ERROR: $e");
-      _quizMarks = [];
+      _quizMarks = _fallbackQuizMarksFromLesson();
       if (mounted) setState(() {});
     }
   }
 
-  // =========================
-  // تشغيل الفيديو (cache + resume)
-  // =========================
   Future<void> _loadVideo() async {
+    if (lessons.isEmpty) return;
+
     final lesson = lessons[_index];
     final url = lesson.videoUrl;
 
@@ -294,8 +346,6 @@ class _LessonsPageState extends State<LessonsPage> {
       _error = null;
       _position = Duration.zero;
       _duration = Duration.zero;
-
-      // reset quiz state على تغيير فيديو
       _blockedMarkId = null;
       _activeMarkId = null;
       _quizDialogOpen = false;
@@ -306,7 +356,6 @@ class _LessonsPageState extends State<LessonsPage> {
     _tick?.cancel();
     _tick = null;
 
-    // Dispose القديم
     final oldChewie = _chewie;
     final oldVideo = _video;
     _chewie = null;
@@ -327,7 +376,6 @@ class _LessonsPageState extends State<LessonsPage> {
 
       _duration = v.value.duration;
 
-      // Resume
       final resume = _lastPosByLessonId[lesson.id];
       if (resume != null && resume > Duration.zero && resume < _duration) {
         await v.seekTo(resume);
@@ -335,7 +383,6 @@ class _LessonsPageState extends State<LessonsPage> {
 
       _lastTickPos = v.value.position;
 
-      // Timer تحديث + حفظ progress/pos للسيرفر
       _tick = Timer.periodic(const Duration(milliseconds: 350), (_) {
         if (!mounted) return;
 
@@ -343,27 +390,18 @@ class _LessonsPageState extends State<LessonsPage> {
         _position = val.position;
         _duration = val.duration;
 
-        // progress
         double prog = 0.0;
         if (_duration.inMilliseconds > 0) {
-          prog = (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0);
+          prog = (_position.inMilliseconds / _duration.inMilliseconds)
+              .clamp(0.0, 1.0);
         }
         _progressByLessonId[lesson.id] = prog;
         _lastPosByLessonId[lesson.id] = _position;
 
-        // كتم موسيقى الخلفية أثناء التشغيل
-        if (val.isPlaying) {
-          _silenceBackgroundMusic();
-        } else {
-          _restoreBackgroundMusic();
-        }
-
-        // ✅ trigger/enforce quiz (أثناء التشغيل + أثناء seek)
         final prev = _lastTickPos;
         final now = _position;
         _lastTickPos = now;
 
-        // نفّذ async عشان مانكسرش Timer
         Future(() => _handleQuizTick(
               lessonId: lesson.id,
               video: v,
@@ -371,13 +409,11 @@ class _LessonsPageState extends State<LessonsPage> {
               now: now,
             ));
 
-        // حفظ state
         _scheduleSaveState(lessonId: lesson.id, videoUrl: lesson.videoUrl);
 
         setState(() {});
       });
 
-      // ✅ Chewie controls (مع marks + منع التخطي لو Blocked)
       final c = ChewieController(
         videoPlayerController: v,
         autoPlay: true,
@@ -389,15 +425,14 @@ class _LessonsPageState extends State<LessonsPage> {
         customControls: VideoControlsWithMarks(
           marks: _quizMarks.map((m) => m.at).toList(),
           blocked: _blockedMarkId != null,
-
-          // ✅ لو المستخدم حاول يشغل وهو blocked: افتح نفس السؤال فورًا
           onBlockedTap: () async {
             final id = _blockedMarkId;
             if (id == null || _video == null) return;
 
             final mark = _quizMarks.firstWhere(
               (m) => m.id == id,
-              orElse: () => QuizMark(id: -1, at: Duration.zero, answered: true),
+              orElse: () =>
+                  QuizMark(id: -1, at: Duration.zero, answered: true),
             );
 
             if (mark.id == -1 || mark.answered) {
@@ -410,7 +445,12 @@ class _LessonsPageState extends State<LessonsPage> {
             await _video!.seekTo(mark.at);
             if (!mounted) return;
 
-            await _openQuizOnce(lessonId: lesson.id, mark: mark, video: _video!, fromBlockedAttempt: true);
+            await _openQuizOnce(
+              lessonId: lesson.id,
+              mark: mark,
+              video: _video!,
+              fromBlockedAttempt: true,
+            );
           },
         ),
       );
@@ -434,10 +474,6 @@ class _LessonsPageState extends State<LessonsPage> {
       });
     }
   }
-
-  // =========================
-  // Quiz Helpers
-  // =========================
 
   QuizMark? _firstUnansweredBetween(Duration start, Duration end) {
     final a = start <= end ? start : end;
@@ -471,48 +507,34 @@ class _LessonsPageState extends State<LessonsPage> {
 
     const tolerance = Duration(milliseconds: 450);
 
-    // 1) لو في Blocked سؤال: ممنوع يكمل
-        // 1) لو في Blocked سؤال: اسمح بالمشاهدة قبل السؤال فقط
     final blocked = _getBlockedMark();
     if (blocked != null) {
-      const tolerance = Duration(milliseconds: 450);
-
       final at = blocked.at;
 
-      // ✅ لو المستخدم قبل السؤال: خليه يتفرج عادي (حتى لو شغال)
       if (now < at - tolerance) {
         return;
       }
 
-      // هنا المستخدم وصل لنقطة السؤال أو بعدها:
-      // - لو بيلعب ووصل للنقطة -> لازم يظهر السؤال
-      // - لو عمل seek وعدّى بعد النقطة -> لازم يظهر السؤال
       final passedForward = now > at + tolerance;
-      final reachedWhilePlaying = video.value.isPlaying; // وصل للنقطة وهو شغال
+      final reachedWhilePlaying = video.value.isPlaying;
 
       if (!passedForward && !reachedWhilePlaying) {
-        // واقف عند النقطة تقريبًا ومش بيحاول يعدّي، سيبه
         return;
       }
 
-      // امنع spam سريع
       final dt = DateTime.now().difference(_lastBlockedPromptAt);
       if (dt < const Duration(milliseconds: 600)) {
-        // بس اقفل التشغيل لو كان شغال
         if (video.value.isPlaying) await video.pause();
         return;
       }
       _lastBlockedPromptAt = DateTime.now();
 
-      // اقفل الفيديو
       if (video.value.isPlaying) await video.pause();
 
-      // ✅ لو عدّى للأمام (seek بعد السؤال) رجّعه لنقطة السؤال
       if (passedForward) {
         await video.seekTo(at);
       }
 
-      // افتح السؤال
       await _openQuizOnce(
         lessonId: lessonId,
         mark: blocked,
@@ -522,18 +544,20 @@ class _LessonsPageState extends State<LessonsPage> {
       return;
     }
 
-    // 2) مش blocked: شوف هل اتخطى سؤال غير مجاوب بين prev و now (تشغيل طبيعي أو seek)
     final mark = _firstUnansweredBetween(prev - tolerance, now + tolerance);
     if (mark == null) return;
 
-    // امنع تكرار سريع داخل نفس اللحظة
     if (_activeMarkId == mark.id) return;
     _activeMarkId = mark.id;
 
-    // افتح السؤال
     await video.pause();
     await video.seekTo(mark.at);
-    await _openQuizOnce(lessonId: lessonId, mark: mark, video: video, fromBlockedAttempt: false);
+    await _openQuizOnce(
+      lessonId: lessonId,
+      mark: mark,
+      video: video,
+      fromBlockedAttempt: false,
+    );
   }
 
   Future<void> _openQuizOnce({
@@ -547,29 +571,26 @@ class _LessonsPageState extends State<LessonsPage> {
 
     _quizDialogOpen = true;
 
-    // افتح الـ dialog
-    await _showQuizDialog(lessonId: lessonId, mark: mark, video: video);
+    await _showQuizDialog(
+      lessonId: lessonId,
+      mark: mark,
+      video: video,
+    );
 
     _quizDialogOpen = false;
 
-    // لو ماجاوبش (ضغط إلغاء أو قفل dialog): اعمل Block صارم
     if (!mark.answered) {
       _blockedMarkId = mark.id;
       if (mounted) setState(() {});
       await video.pause();
       await video.seekTo(mark.at);
     } else {
-      // فك أي بلوك
       _blockedMarkId = null;
       if (mounted) setState(() {});
-      // اسمح يكمل
       await video.play();
     }
   }
 
-  // =========================
-  // Popup السؤال
-  // =========================
   Future<void> _showQuizDialog({
     required String lessonId,
     required QuizMark mark,
@@ -585,7 +606,6 @@ class _LessonsPageState extends State<LessonsPage> {
           SnackBar(content: Text("تعذر تحميل السؤال: $e")),
         );
       }
-      // لو فشل تحميل السؤال نسمح له يكمل (علشان متقفلش الفيديو للأبد)
       await video.play();
       return;
     }
@@ -599,7 +619,7 @@ class _LessonsPageState extends State<LessonsPage> {
 
     await showDialog(
       context: context,
-      barrierDismissible: false, // ممنوع يقفل بالضغط بره
+      barrierDismissible: false,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setSt) {
@@ -615,7 +635,8 @@ class _LessonsPageState extends State<LessonsPage> {
               });
 
               try {
-                final ok = await lessonsApi.answerQuiz(lessonId, mark.id, selectedKey!);
+                final ok =
+                    await lessonsApi.answerQuiz(lessonId, mark.id, selectedKey!);
 
                 if (!ok) {
                   setSt(() {
@@ -625,10 +646,7 @@ class _LessonsPageState extends State<LessonsPage> {
                   return;
                 }
 
-                // ✅ إجابة صحيحة
                 mark.answered = true;
-
-                // ✅ فك البلوك لو كان محجوز
                 _blockedMarkId = null;
 
                 if (mounted) setState(() {});
@@ -656,31 +674,34 @@ class _LessonsPageState extends State<LessonsPage> {
                       return RadioListTile<String>(
                         value: key,
                         groupValue: selectedKey,
-                        onChanged: submitting ? null : (v) => setSt(() => selectedKey = v),
+                        onChanged: submitting
+                            ? null
+                            : (v) => setSt(() => selectedKey = v),
                         title: Text(text),
                       );
                     }),
                     if (localError != null) ...[
                       const SizedBox(height: 8),
-                      Text(localError!, style: const TextStyle(color: Colors.redAccent)),
+                      Text(
+                        localError!,
+                        style: const TextStyle(color: Colors.redAccent),
+                      ),
                     ],
                   ],
                 ),
               ),
               actions: [
-                // ✅ إلغاء: يقفل الـ popup لكن يخلي الفيديو واقف ومقفول على نفس السؤال
                 TextButton(
-          onPressed: submitting
-            ? null
-      :    () async {
-          _blockedMarkId = mark.id;
-          if (mounted) setState(() {});
-          await video.pause();   // ✅ يقف
-          Navigator.pop(ctx);    // ✅ يقفل
-          // ❌ بدون seekTo هنا
-                   },
-              child: const Text("إلغاء"),
-),
+                  onPressed: submitting
+                      ? null
+                      : () async {
+                          _blockedMarkId = mark.id;
+                          if (mounted) setState(() {});
+                          await video.pause();
+                          Navigator.pop(ctx);
+                        },
+                  child: const Text("إلغاء"),
+                ),
                 ElevatedButton(
                   onPressed: submitting ? null : submit,
                   child: Text(submitting ? "جاري التحقق..." : "تأكيد"),
@@ -693,10 +714,10 @@ class _LessonsPageState extends State<LessonsPage> {
     );
   }
 
-  // =========================
-  // حفظ state (Debounce)
-  // =========================
-  void _scheduleSaveState({required String lessonId, required String videoUrl}) {
+  void _scheduleSaveState({
+    required String lessonId,
+    required String videoUrl,
+  }) {
     _saveDebounce?.cancel();
     _saveDebounce = Timer(const Duration(seconds: 1), () async {
       try {
@@ -719,10 +740,8 @@ class _LessonsPageState extends State<LessonsPage> {
     });
   }
 
-  // =========================
-  // Favorites
-  // =========================
   void _toggleFavorite() {
+    if (lessons.isEmpty) return;
     final id = lessons[_index].id;
     setState(() {
       if (_favoriteLessons.contains(id)) {
@@ -734,9 +753,6 @@ class _LessonsPageState extends State<LessonsPage> {
     _scheduleSaveState(lessonId: id, videoUrl: lessons[_index].videoUrl);
   }
 
-  // =========================
-  // Bookmarks UI + Helpers
-  // =========================
   String _fmtShort(Duration d) {
     String two(int n) => n.toString().padLeft(2, '0');
     final h = d.inHours;
@@ -747,6 +763,7 @@ class _LessonsPageState extends State<LessonsPage> {
   }
 
   Future<void> _addBookmark() async {
+    if (lessons.isEmpty) return;
     if (_video == null || !_video!.value.isInitialized) return;
 
     final lessonId = lessons[_index].id;
@@ -762,7 +779,10 @@ class _LessonsPageState extends State<LessonsPage> {
           decoration: const InputDecoration(hintText: "وصف مختصر (اختياري)"),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text("إلغاء")),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("إلغاء"),
+          ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, ctrl.text.trim()),
             child: const Text("إضافة"),
@@ -818,6 +838,8 @@ class _LessonsPageState extends State<LessonsPage> {
   }
 
   Widget _buildBookmarksBar() {
+    if (lessons.isEmpty) return const SizedBox.shrink();
+
     final lessonId = lessons[_index].id;
     final list = _bookmarksByLessonId[lessonId] ?? const [];
 
@@ -859,7 +881,10 @@ class _LessonsPageState extends State<LessonsPage> {
                       const SizedBox(width: 6),
                       Text(
                         "${_fmtShort(b.at)} • ${b.label}",
-                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                        ),
                       ),
                     ],
                   ),
@@ -868,7 +893,11 @@ class _LessonsPageState extends State<LessonsPage> {
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => _deleteBookmark(b),
-                  child: const Icon(Icons.close, color: Colors.white70, size: 16),
+                  child: const Icon(
+                    Icons.close,
+                    color: Colors.white70,
+                    size: 16,
+                  ),
                 ),
               ],
             ),
@@ -878,28 +907,6 @@ class _LessonsPageState extends State<LessonsPage> {
     );
   }
 
-  // =========================
-  // موسيقى الخلفية
-  // =========================
-  Future<void> _silenceBackgroundMusic() async {
-    if (_bgWasSilencedByMe) return;
-    try {
-      await MyProfessionalApp.audioPlayer.setVolume(0);
-      _bgWasSilencedByMe = true;
-    } catch (_) {}
-  }
-
-  Future<void> _restoreBackgroundMusic() async {
-    if (!_bgWasSilencedByMe) return;
-    try {
-      await MyProfessionalApp.audioPlayer.setVolume(_bgVolumeBefore);
-    } catch (_) {}
-    _bgWasSilencedByMe = false;
-  }
-
-  // =========================
-  // تنقل بين الدروس
-  // =========================
   Future<void> _goTo(int i) async {
     if (_switching) return;
     if (i < 0 || i >= lessons.length) return;
@@ -923,15 +930,12 @@ class _LessonsPageState extends State<LessonsPage> {
   void dispose() {
     _saveDebounce?.cancel();
     _tick?.cancel();
-    _restoreBackgroundMusic();
     _chewie?.dispose();
     _video?.dispose();
+    _resumeBackgroundMusicIfNeeded();
     super.dispose();
   }
 
-  // =========================
-  // Sidebar Helpers
-  // =========================
   bool _lessonHasBookmarks(String lessonId) {
     final list = _bookmarksByLessonId[lessonId];
     return list != null && list.isNotEmpty;
@@ -978,12 +982,18 @@ class _LessonsPageState extends State<LessonsPage> {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(999),
             color: selected ? Colors.white24 : Colors.white10,
-            border: Border.all(color: selected ? Colors.white38 : Colors.white12),
+            border: Border.all(
+              color: selected ? Colors.white38 : Colors.white12,
+            ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 16, color: selected ? Colors.white : Colors.white70),
+              Icon(
+                icon,
+                size: 16,
+                color: selected ? Colors.white : Colors.white70,
+              ),
               const SizedBox(width: 6),
               Text(
                 text,
@@ -1006,8 +1016,16 @@ class _LessonsPageState extends State<LessonsPage> {
         runSpacing: 8,
         children: [
           chip(value: LessonsFilter.all, icon: Icons.list, text: "الكل"),
-          chip(value: LessonsFilter.favorites, icon: Icons.star, text: "المفضلة"),
-          chip(value: LessonsFilter.bookmarked, icon: Icons.bookmark, text: "فيها علامات"),
+          chip(
+            value: LessonsFilter.favorites,
+            icon: Icons.star,
+            text: "المفضلة",
+          ),
+          chip(
+            value: LessonsFilter.bookmarked,
+            icon: Icons.bookmark,
+            text: "فيها علامات",
+          ),
         ],
       ),
     );
@@ -1031,9 +1049,13 @@ class _LessonsPageState extends State<LessonsPage> {
               ? Column(
                   children: [
                     const SizedBox(height: 12),
-                    const Text(
-                      "قائمة الدروس",
-                      style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                    Text(
+                      "قائمة دروس ${widget.title}",
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                     const SizedBox(height: 10),
                     _sidebarFiltersRow(),
@@ -1047,16 +1069,22 @@ class _LessonsPageState extends State<LessonsPage> {
                               ),
                             )
                           : ListView.separated(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 10,
+                              ),
                               itemCount: listIndexes.length,
-                              separatorBuilder: (_, __) => const SizedBox(height: 8),
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(height: 8),
                               itemBuilder: (_, idx) {
                                 final i = listIndexes[idx];
                                 final l = lessons[i];
                                 final selected = i == _index;
                                 final fav = _favoriteLessons.contains(l.id);
-                                final prog = (_progressByLessonId[l.id] ?? 0.0).clamp(0.0, 1.0);
-                                final bmCount = (_bookmarksByLessonId[l.id]?.length ?? 0);
+                                final prog = (_progressByLessonId[l.id] ?? 0.0)
+                                    .clamp(0.0, 1.0);
+                                final bmCount =
+                                    (_bookmarksByLessonId[l.id]?.length ?? 0);
 
                                 return InkWell(
                                   borderRadius: BorderRadius.circular(14),
@@ -1065,48 +1093,78 @@ class _LessonsPageState extends State<LessonsPage> {
                                     padding: const EdgeInsets.all(12),
                                     decoration: BoxDecoration(
                                       borderRadius: BorderRadius.circular(14),
-                                      color: selected ? Colors.white24 : Colors.white10,
-                                      border: Border.all(color: selected ? Colors.white38 : Colors.white12),
+                                      color: selected
+                                          ? Colors.white24
+                                          : Colors.white10,
+                                      border: Border.all(
+                                        color: selected
+                                            ? Colors.white38
+                                            : Colors.white12,
+                                      ),
                                     ),
                                     child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
                                         Row(
                                           children: [
                                             Icon(
-                                              fav ? Icons.star : Icons.play_circle_outline,
-                                              color: fav ? Colors.amber : Colors.white70,
+                                              fav
+                                                  ? Icons.star
+                                                  : Icons.play_circle_outline,
+                                              color: fav
+                                                  ? Colors.amber
+                                                  : Colors.white70,
                                             ),
                                             const SizedBox(width: 10),
                                             Expanded(
                                               child: Text(
                                                 l.title,
                                                 style: TextStyle(
-                                                  color: selected ? Colors.white : Colors.white70,
-                                                  fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                                                  color: selected
+                                                      ? Colors.white
+                                                      : Colors.white70,
+                                                  fontWeight: selected
+                                                      ? FontWeight.bold
+                                                      : FontWeight.w500,
                                                 ),
                                               ),
                                             ),
                                             if (bmCount > 0) ...[
-                                              const Icon(Icons.bookmark, color: Colors.white70, size: 18),
+                                              const Icon(
+                                                Icons.bookmark,
+                                                color: Colors.white70,
+                                                size: 18,
+                                              ),
                                               const SizedBox(width: 4),
                                               Text(
                                                 "$bmCount",
-                                                style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                                style: const TextStyle(
+                                                  color: Colors.white70,
+                                                  fontSize: 12,
+                                                ),
                                               ),
                                               const SizedBox(width: 8),
                                             ],
-                                            if (selected) const Icon(Icons.chevron_right, color: Colors.white),
+                                            if (selected)
+                                              const Icon(
+                                                Icons.chevron_right,
+                                                color: Colors.white,
+                                              ),
                                           ],
                                         ),
                                         const SizedBox(height: 8),
                                         ClipRRect(
-                                          borderRadius: BorderRadius.circular(999),
+                                          borderRadius:
+                                              BorderRadius.circular(999),
                                           child: LinearProgressIndicator(
                                             value: prog,
                                             minHeight: 6,
                                             backgroundColor: Colors.white12,
-                                            valueColor: const AlwaysStoppedAnimation(Colors.redAccent),
+                                            valueColor:
+                                                const AlwaysStoppedAnimation(
+                                              Colors.redAccent,
+                                            ),
                                           ),
                                         ),
                                       ],
@@ -1142,7 +1200,9 @@ class _LessonsPageState extends State<LessonsPage> {
             border: Border.all(color: Colors.white12),
           ),
           child: Icon(
-            _sidebarOpen ? Icons.arrow_back_ios_new : Icons.arrow_forward_ios,
+            _sidebarOpen
+                ? Icons.arrow_back_ios_new
+                : Icons.arrow_forward_ios,
             color: Colors.white,
             size: 18,
           ),
@@ -1151,14 +1211,153 @@ class _LessonsPageState extends State<LessonsPage> {
     );
   }
 
-  // =========================
-  // UI
-  // =========================
+  Widget _buildTitleBar(bool hasLessons, LessonItem currentLesson) {
+    return Column(
+      children: [
+        strokeText(
+          widget.title,
+          size: 28,
+          fillColor: const Color.fromARGB(255, 0, 0, 0),
+          strokeColor: const Color.fromARGB(255, 255, 255, 255),
+          strokeWidth: 1.5,
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 10,
+          runSpacing: 6,
+          children: [
+            strokeText(
+              currentLesson.title,
+              size: 25,
+              fillColor: const Color.fromARGB(255, 0, 0, 0),
+              strokeColor: const Color.fromARGB(255, 255, 255, 255),
+              strokeWidth: 1.5,
+            ),
+            IconButton(
+              onPressed: hasLessons ? _toggleFavorite : null,
+              tooltip: "مفضلة",
+              icon: Icon(
+                _favoriteLessons.contains(currentLesson.id)
+                    ? Icons.star
+                    : Icons.star_border,
+                color: Colors.amber,
+              ),
+            ),
+            IconButton(
+              onPressed: hasLessons ? _addBookmark : null,
+              tooltip: "إضافة علامة داخل الفيديو",
+              icon: const Icon(
+                Icons.bookmark_add,
+                color: Color.fromARGB(255, 117, 104, 104),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildVideoRow(bool hasPrev, bool hasNext) {
+    return Row(
+      children: [
+        _navBtn(
+          icon: Icons.chevron_left,
+          onTap: hasPrev ? _prev : null,
+          tooltip: "الدرس السابق",
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * _videoWidthFactor,
+              ),
+              child: AspectRatio(
+                aspectRatio: _videoFrameAspectRatio,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    color: Colors.black,
+                    child: _loading
+                        ? const Center(
+                            child: CircularProgressIndicator(),
+                          )
+                        : (_error != null)
+                            ? Center(
+                                child: Text(
+                                  _error!,
+                                  style: const TextStyle(color: Colors.white),
+                                  textAlign: TextAlign.center,
+                                ),
+                              )
+                            : Stack(
+                                children: [
+                                  Positioned.fill(
+                                    child: ClipRect(
+                                      child: Transform.scale(
+                                        scale: _zoomScale,
+                                        child: Chewie(
+                                          controller: _chewie!,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Positioned(
+                                    top: 8,
+                                    right: 8,
+                                    child: InkWell(
+                                      onTap: () => setState(
+                                        () => _zoomed = !_zoomed,
+                                      ),
+                                      borderRadius: BorderRadius.circular(999),
+                                      child: Container(
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black.withOpacity(0.35),
+                                          borderRadius:
+                                              BorderRadius.circular(999),
+                                          border: Border.all(
+                                            color: Colors.white24,
+                                          ),
+                                        ),
+                                        child: Icon(
+                                          _zoomed
+                                              ? Icons.zoom_out_map
+                                              : Icons.zoom_in_map,
+                                          color: Colors.white,
+                                          size: 20,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        _navBtn(
+          icon: Icons.chevron_right,
+          onTap: hasNext ? _next : null,
+          tooltip: "الدرس القادم",
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final hasPrev = _index > 0;
-    final hasNext = _index < lessons.length - 1;
-    final currentLesson = lessons[_index];
+    final hasLessons = lessons.isNotEmpty;
+    final hasPrev = hasLessons && _index > 0;
+    final hasNext = hasLessons && _index < lessons.length - 1;
+    final currentLesson = hasLessons
+        ? lessons[_index]
+        : LessonItem(id: '', title: '', videoUrl: '', rawQuizMarks: const []);
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
@@ -1197,124 +1396,26 @@ class _LessonsPageState extends State<LessonsPage> {
                   AnimatedPadding(
                     duration: const Duration(milliseconds: 220),
                     curve: Curves.easeOut,
-                    padding: EdgeInsets.only(left: _sidebarOpen ? _sidebarWidth : 0),
+                    padding: EdgeInsets.only(
+                      left: _sidebarOpen ? _sidebarWidth : 0,
+                    ),
                     child: Center(
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 12),
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            // عنوان الدرس + Favorite + Add Bookmark
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                strokeText(
-                                  currentLesson.title,
-                                  size: 25,
-                                  fillColor: const Color.fromARGB(255, 0, 0, 0),
-                                  strokeColor: const Color.fromARGB(255, 255, 255, 255),
-                                  strokeWidth: 1.5,
-                                ),
-                                const SizedBox(width: 10),
-                                IconButton(
-                                  onPressed: _toggleFavorite,
-                                  tooltip: "مفضلة",
-                                  icon: Icon(
-                                    _favoriteLessons.contains(currentLesson.id) ? Icons.star : Icons.star_border,
-                                    color: Colors.amber,
-                                  ),
-                                ),
-                                IconButton(
-                                  onPressed: _addBookmark,
-                                  tooltip: "إضافة علامة داخل الفيديو",
-                                  icon: const Icon(Icons.bookmark_add, color: Color.fromARGB(255, 117, 104, 104)),
-                                ),
-                              ],
-                            ),
+                            _buildTitleBar(hasLessons, currentLesson),
                             const SizedBox(height: 14),
-                            // صف: السابق + الفيديو + القادم
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                _navBtn(
-                                  icon: Icons.chevron_left,
-                                  onTap: hasPrev ? _prev : null,
-                                  tooltip: "الدرس السابق",
-                                ),
-                                const SizedBox(width: 10),
-                                SizedBox(
-                                  width: MediaQuery.of(context).size.width * _videoWidthFactor,
-                                  child: AspectRatio(
-                                    aspectRatio: (_video?.value.isInitialized ?? false) ? _video!.value.aspectRatio : 16 / 9,
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(16),
-                                      child: Container(
-                                        color: Colors.black,
-                                        child: _loading
-                                            ? const Center(child: CircularProgressIndicator())
-                                            : (_error != null)
-                                                ? Center(
-                                                    child: Text(
-                                                      _error!,
-                                                      style: const TextStyle(color: Colors.white),
-                                                      textAlign: TextAlign.center,
-                                                    ),
-                                                  )
-                                                : Stack(
-                                                    children: [
-                                                      Positioned.fill(
-                                                        child: ClipRect(
-                                                          child: Transform.scale(
-                                                            scale: _zoomScale,
-                                                            child: Chewie(controller: _chewie!),
-                                                          ),
-                                                        ),
-                                                      ),
-                                                      // زر التكبير/التصغير
-                                                      Positioned(
-                                                        top: 8,
-                                                        right: 8,
-                                                        child: InkWell(
-                                                          onTap: () => setState(() => _zoomed = !_zoomed),
-                                                          borderRadius: BorderRadius.circular(999),
-                                                          child: Container(
-                                                            padding: const EdgeInsets.all(8),
-                                                            decoration: BoxDecoration(
-                                                              color: Colors.black.withOpacity(0.35),
-                                                              borderRadius: BorderRadius.circular(999),
-                                                              border: Border.all(color: Colors.white24),
-                                                            ),
-                                                            child: Icon(
-                                                              _zoomed ? Icons.zoom_out_map : Icons.zoom_in_map,
-                                                              color: Colors.white,
-                                                              size: 20,
-                                                            ),
-                                                          ),
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                _navBtn(
-                                  icon: Icons.chevron_right,
-                                  onTap: hasNext ? _next : null,
-                                  tooltip: "الدرس القادم",
-                                ),
-                              ],
-                            ),
+                            _buildVideoRow(hasPrev, hasNext),
                             const SizedBox(height: 12),
-                            // شريط العلامات (Bookmarks) للدرس الحالي
-                            _buildBookmarksBar(),
+                            if (hasLessons) _buildBookmarksBar(),
                             const SizedBox(height: 10),
-                            // مؤشر رقم الدرس
-                            Text(
-                              "(${_index + 1} / ${lessons.length})",
-                              style: const TextStyle(color: Colors.white70),
-                            ),
+                            if (hasLessons)
+                              Text(
+                                "(${_index + 1} / ${lessons.length})",
+                                style: const TextStyle(color: Colors.white70),
+                              ),
                           ],
                         ),
                       ),
@@ -1329,9 +1430,6 @@ class _LessonsPageState extends State<LessonsPage> {
     );
   }
 
-  // =========================
-  // زر دائري للسابق/القادم
-  // =========================
   Widget _navBtn({
     required IconData icon,
     required VoidCallback? onTap,
@@ -1351,7 +1449,9 @@ class _LessonsPageState extends State<LessonsPage> {
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             color: disabled ? Colors.white10 : Colors.white24,
-            border: Border.all(color: disabled ? Colors.white12 : Colors.white30),
+            border: Border.all(
+              color: disabled ? Colors.white12 : Colors.white30,
+            ),
             boxShadow: disabled
                 ? const []
                 : [

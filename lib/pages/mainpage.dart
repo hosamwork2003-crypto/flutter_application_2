@@ -17,14 +17,21 @@ import '../services/auth_api.dart';
 
 import 'courses.dart';
 import 'games.dart';
-import 'lessons.dart';
 import 'sheets.dart';
 import 'social.dart';
 import 'edit_profile.dart';
 import 'login.dart';
+import 'lessons_subjects.dart';
+import 'admin_lessons_page.dart';
 
 class MainPage extends StatefulWidget {
-  const MainPage({super.key});
+  final bool isAdmin;
+
+  const MainPage({
+    super.key,
+    this.isAdmin = false,
+  });
+
   @override
   State<MainPage> createState() => _MainPageState();
 }
@@ -37,17 +44,29 @@ class _MainPageState extends State<MainPage> {
   final AudioPlayer _sfxPlayer = AudioPlayer();
   String? _activeButton;
 
+  bool get _adminVisible => me?['is_admin'] == true;
+
   @override
   void initState() {
     super.initState();
+    debugPrint("MAIN PAGE opened");
     _prepareSfx();
     _loadMe();
   }
 
   Future<void> _loadMe() async {
     try {
-      me = await authApi.me();
-    } catch (_) {
+      final data = await authApi.me();
+      me = data;
+      debugPrint(
+  "MAIN PAGE /me => id=${data['id']}, "
+  "name=${data['name']}, "
+  "email=${data['email']}, "
+  "is_admin=${data['is_admin']}",
+);
+      debugPrint("MAIN PAGE resolved admin = ${data['is_admin'] == true}");
+    } catch (e) {
+      debugPrint("MAIN PAGE /me error: $e");
       me = null;
     }
     if (mounted) setState(() {});
@@ -77,110 +96,122 @@ class _MainPageState extends State<MainPage> {
     }
   }
 
-Future<void> toggleSound() async {
-  HapticFeedback.heavyImpact();
+  Future<void> toggleSound() async {
+    HapticFeedback.heavyImpact();
 
-  final nextMuted = !isMuted;
+    final nextMuted = !isMuted;
 
-  setState(() {
-    isMuted = nextMuted;
-  });
+    setState(() {
+      isMuted = nextMuted;
+    });
 
-  try {
-    if (nextMuted) {
-      await MyProfessionalApp.pauseBgMusic();
-    } else {
-      await MyProfessionalApp.resumeBgMusic();
-    }
-  } catch (e) {
-    debugPrint("Toggle sound error: $e");
-  }
-}
-
-   _pushInstant(Widget page) async {
-  await Navigator.of(context).push(NoAnimRoute(builder: (_) => page));
-  _loadMe(); // ✅ بعد الرجوع يحدث avatar (هيبقى null لو Logout)
-}
-
-void _openProfileSheet() {
-  if (me == null) return; // ✅ أمان إضافي
-
-  final fullName = (me?['full_name'] ?? me?['name'] ?? '') as String;
-  final level = (me?['academic_level'] ?? 'Not set') as String;
-
-  showModalBottomSheet(
-    context: context,
-    backgroundColor: Colors.black.withOpacity(0.85),
-    builder: (_) {
-      return SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                fullName,
-                style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 6),
-              Text("Academic level: $level", style: const TextStyle(color: Colors.white70)),
-              const SizedBox(height: 14),
-
-              // ✅ Edit
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    final updated = await Navigator.of(context).push(
-                      NoAnimRoute(builder: (_) => EditProfilePage(initial: me)),
-                    );
-                    if (updated == true) _loadMe();
-                  },
-                  child: const Text("Edit"),
-                ),
-              ),
-
-              const SizedBox(height: 10),
-
-              // ✅ Logout
-              SizedBox(
-  width: double.infinity,
-  child: ElevatedButton(
-    onPressed: () async {
-      await authApi.logout();
-      if (!mounted) return;
-
-      setState(() => me = null);
-      Navigator.pop(context); // يقفل الـ bottom sheet
-
-      // ✅ يفتح صفحة اللوجن ويمنع استخدام التطبيق بدونها
-      final ok = await Navigator.of(context).push(
-        NoAnimRoute(builder: (_) => const LoginPage()),
-      );
-
-      // لو سجّل بنجاح -> حدث بياناته/الأفاتار
-      if (ok == true) {
-        await _loadMe();
+    try {
+      if (nextMuted) {
+        await MyProfessionalApp.pauseBgMusic();
       } else {
-        // لو رجع (Back) نفتحها تاني (عشان لازم يسجل)
-        if (!mounted) return;
-        await Navigator.of(context).push(
-          NoAnimRoute(builder: (_) => const LoginPage()),
-        );
-        await _loadMe();
+        await MyProfessionalApp.resumeBgMusic();
       }
-    },
-    child: const Text("Logout"),
-  ),
-),
-            ],
-          ),
-        ),
-      );
-    },
-  );
+    } catch (e) {
+      debugPrint("Toggle sound error: $e");
+    }
+  }
+
+  Future<void> _pushInstant(Widget page) async {
+    await Navigator.of(context).push(NoAnimRoute(builder: (_) => page));
+    await _loadMe(); // ✅ بعد الرجوع يحدث avatar / admin state
+  }
+
+void _openAdminPage() {
+  _pushInstant(const AdminLessonsPage());
 }
+
+  void _openProfileSheet() {
+    if (me == null) return; // ✅ أمان إضافي
+
+    final fullName = (me?['full_name'] ?? me?['name'] ?? '') as String;
+    final level = (me?['academic_level'] ?? 'Not set') as String;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.black.withOpacity(0.85),
+      builder: (_) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  fullName,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  "Academic level: $level",
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 14),
+
+                // ✅ Edit
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      Navigator.pop(context);
+                      final updated = await Navigator.of(context).push(
+                        NoAnimRoute(builder: (_) => EditProfilePage(initial: me)),
+                      );
+                      if (updated == true) {
+                        await _loadMe();
+                      }
+                    },
+                    child: const Text("Edit"),
+                  ),
+                ),
+
+                const SizedBox(height: 10),
+
+                // ✅ Logout
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      await authApi.logout();
+                      if (!mounted) return;
+
+                      setState(() => me = null);
+                      Navigator.pop(context); // يقفل الـ bottom sheet
+
+                      // ✅ يفتح صفحة اللوجن ويمنع استخدام التطبيق بدونها
+                      final ok = await Navigator.of(context).push(
+                        NoAnimRoute(builder: (_) => const LoginPage()),
+                      );
+
+                      // لو سجّل بنجاح -> حدث بياناته/الأفاتار
+                      if (ok == true) {
+                        await _loadMe();
+                      } else {
+                        if (!mounted) return;
+                        await Navigator.of(context).push(
+                          NoAnimRoute(builder: (_) => const LoginPage()),
+                        );
+                        await _loadMe();
+                      }
+                    },
+                    child: const Text("Logout"),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   Widget _buildProfileAvatar() {
     final base64Str = me?['avatar_base64'] as String?;
@@ -194,19 +225,19 @@ void _openProfileSheet() {
 
     return GestureDetector(
       onTap: () async {
-  _playClickSound();
+        _playClickSound();
 
-  if (me == null) {
-    // ✅ مش مسجل → افتح صفحة اللوجن
-    final ok = await Navigator.of(context).push(
-      NoAnimRoute(builder: (_) => const LoginPage()),
-    );
-    if (ok == true) await _loadMe();
-  } else {
-    // ✅ مسجل → افتح الشيت
-    _openProfileSheet();
-  }
-},
+        if (me == null) {
+          final ok = await Navigator.of(context).push(
+            NoAnimRoute(builder: (_) => const LoginPage()),
+          );
+          if (ok == true) {
+            await _loadMe();
+          }
+        } else {
+          _openProfileSheet();
+        }
+      },
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -215,12 +246,39 @@ void _openProfileSheet() {
             backgroundColor: Colors.white24,
             backgroundImage: img,
             child: img == null
-                ? const Icon(Icons.person, color: Color.fromARGB(255, 0, 0, 0))
+                ? const Icon(Icons.person, color: Colors.black)
                 : null,
           ),
           const SizedBox(height: 4),
-          const Text("Account",
-              style: TextStyle(color: Colors.white, fontSize: 14)),
+          const Text(
+            "Account",
+            style: TextStyle(color: Colors.white, fontSize: 14),
+          ),
+
+          // ✅ زر الأدمن هنا
+          if (_adminVisible) ...[
+            const SizedBox(height: 6),
+            GestureDetector(
+              onTap: () {
+                _playClickSound();
+                _openAdminPage();
+              },
+              child: Column(
+                children: const [
+                  Icon(
+                    Icons.admin_panel_settings,
+                    color: Colors.redAccent,
+                    size: 22,
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    "Admin",
+                    style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -237,8 +295,10 @@ void _openProfileSheet() {
         children: [
           Icon(icon, size: 32, color: Colors.white),
           const SizedBox(height: 4),
-          Text(label,
-              style: const TextStyle(color: Colors.white, fontSize: 12)),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+          ),
         ],
       ),
     );
@@ -249,16 +309,25 @@ void _openProfileSheet() {
       icon: Column(
         mainAxisSize: MainAxisSize.min,
         children: const [
-          Icon(Icons.settings, size: 32, color: Color.fromARGB(255, 126, 126, 126)),
+          Icon(
+            Icons.settings,
+            size: 32,
+            color: Color.fromARGB(255, 126, 126, 126),
+          ),
           SizedBox(height: 4),
-          Text("Settings",
-              style: TextStyle(color: Color.fromARGB(255, 110, 110, 110), fontSize: 12)),
+          Text(
+            "Settings",
+            style: TextStyle(
+              color: Color.fromARGB(255, 110, 110, 110),
+              fontSize: 12,
+            ),
+          ),
         ],
       ),
-onSelected: (val) async {
-  if (val == 'mute') await toggleSound();
-  if (val == 'page') _pushInstant(const SettingsTab());
-},
+      onSelected: (val) async {
+        if (val == 'mute') await toggleSound();
+        if (val == 'page') await _pushInstant(const SettingsTab());
+      },
       itemBuilder: (ctx) => [
         PopupMenuItem(
           value: 'mute',
@@ -364,14 +433,22 @@ onSelected: (val) async {
                     left: 10,
                     right: 10,
                     child: Row(
-  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-  children: [
-    _buildProfileAvatar(), // ✅ Account أقصى الشمال
-    _buildHeaderIcon(Icons.emoji_events, "Rank", const RankTab()),
-    _buildHeaderIcon(Icons.hub, "Connects", const ConnectesTab()),
-    _buildSettingsDropdown(),
-  ],
-),
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _buildProfileAvatar(),
+                        _buildHeaderIcon(
+                          Icons.emoji_events,
+                          "Rank",
+                          const RankTab(),
+                        ),
+                        _buildHeaderIcon(
+                          Icons.hub,
+                          "Connects",
+                          const ConnectesTab(),
+                        ),
+                        _buildSettingsDropdown(),
+                      ],
+                    ),
                   ),
                   Center(
                     child: SingleChildScrollView(
@@ -382,27 +459,41 @@ onSelected: (val) async {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              _buildCloudButton('Courses', const CoursesPage(),
-                                  isSmall: true),
+                              _buildCloudButton(
+                                'Courses',
+                                const CoursesPage(),
+                                isSmall: true,
+                              ),
                               const SizedBox(width: 130),
-                              _buildCloudButton('Games', const GamesPage(),
-                                  isSmall: true),
+                              _buildCloudButton(
+                                'Games',
+                                const GamesPage(),
+                                isSmall: true,
+                              ),
                             ],
                           ),
                           const SizedBox(height: 60),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              _buildCloudButton('Lessons', const LessonsPage(),
-                                  isSmall: true),
-                              const SizedBox(width: 130),
-                              _buildCloudButton('Sheets', const SheetsPage(),
-                                  isSmall: true),
+                              _buildCloudButton(
+                                'Lessons',
+                                const LessonsSubjectsPage(),
+                                isSmall: true,
+                              ),
+                              _buildCloudButton(
+                                'Sheets',
+                                const SheetsPage(),
+                                isSmall: true,
+                              ),
                             ],
                           ),
                           const SizedBox(height: 60),
-                          _buildCloudButton('Social', const SocialPage(),
-                              isSmall: false),
+                          _buildCloudButton(
+                            'Social',
+                            const SocialPage(),
+                            isSmall: false,
+                          ),
                           const SizedBox(height: 100),
                         ],
                       ),
@@ -411,6 +502,23 @@ onSelected: (val) async {
                 ],
               ),
             ),
+
+            if (_adminVisible)
+              Positioned(
+                bottom: 20,
+                right: 20,
+                child: FloatingActionButton(
+                  backgroundColor: Colors.black.withOpacity(0.7),
+                  onPressed: () {
+                    _playClickSound();
+                    _openAdminPage();
+                  },
+                  child: const Icon(
+                    Icons.admin_panel_settings,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
           ],
         ),
       ),

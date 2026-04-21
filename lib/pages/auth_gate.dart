@@ -6,7 +6,6 @@ import '../widgets/no_anim_route.dart';
 
 import 'mainpage.dart';
 import 'login.dart';
-
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
 
@@ -15,6 +14,7 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> {
+  bool isAdmin = false;
   final auth = AuthApi(ApiClient('http://192.168.1.114:3000'));
 
   @override
@@ -23,32 +23,47 @@ class _AuthGateState extends State<AuthGate> {
     _boot();
   }
 
-  Future<void> _boot() async {
-    // 1) لو التوكن صالح -> MainPage
-    try {
-      await auth.me();
-      if (!mounted) return;
-      Navigator.of(context).pushReplacement(NoAnimRoute(builder: (_) => const MainPage()));
-      return;
-    } catch (_) {}
+Future<void> _boot() async {
+  try {
+    final user = await auth.me();
+    final isAdmin = user['is_admin'] == true;
 
-    // 2) مش مسجل -> افتح Login و"استنى" نتيجته
+    debugPrint("USER FROM /me = $user");
+    debugPrint("AUTH GATE isAdmin = $isAdmin");
+
     if (!mounted) return;
-    final ok = await Navigator.of(context).push(
-      NoAnimRoute(builder: (_) => const LoginPage()),
+
+    Navigator.of(context).pushReplacement(
+      NoAnimRoute(
+        builder: (_) => MainPage(isAdmin: isAdmin),
+      ),
     );
+    return;
+  } catch (_) {}
 
-    // 3) لو نجح -> ادخل MainPage
-    if (ok == true) {
+  if (!mounted) return;
+  final ok = await Navigator.of(context).push(
+    NoAnimRoute(builder: (_) => const LoginPage()),
+  );
+
+  if (ok == true) {
+    try {
+      final user = await auth.me();
+      final isAdmin = user['is_admin'] == true;
+
+      debugPrint("USER FROM /me AFTER LOGIN = $user");
+      debugPrint("AUTH GATE isAdmin AFTER LOGIN = $isAdmin");
+
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(NoAnimRoute(builder: (_) => const MainPage()));
-      return;
-    }
 
-    // 4) لو رجع false (ضغط Back) -> يفضل على شاشة اللوجن (يجرب تاني)
-    if (!mounted) return;
-    _boot();
+      Navigator.of(context).pushReplacement(
+        NoAnimRoute(
+          builder: (_) => MainPage(isAdmin: isAdmin),
+        ),
+      );
+    } catch (_) {}
   }
+}
 
   @override
   Widget build(BuildContext context) {
