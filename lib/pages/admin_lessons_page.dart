@@ -20,7 +20,6 @@ class _AdminLessonsPageState extends State<AdminLessonsPage> {
   final _formKey = GlobalKey<FormState>();
 
   final TextEditingController _lessonNameCtrl = TextEditingController();
-  final TextEditingController _lessonIdCtrl = TextEditingController();
   final TextEditingController _qFileNameCtrl = TextEditingController();
 
   String? _selectedSubject;
@@ -44,7 +43,6 @@ class _AdminLessonsPageState extends State<AdminLessonsPage> {
   @override
   void dispose() {
     _lessonNameCtrl.dispose();
-    _lessonIdCtrl.dispose();
     _qFileNameCtrl.dispose();
 
     for (final mark in _marks) {
@@ -115,10 +113,12 @@ class _AdminLessonsPageState extends State<AdminLessonsPage> {
 
     if (!_formKey.currentState!.validate()) return;
 
-    if (_selectedSubject == null || _selectedSubject!.trim().isEmpty) {
-      _showSnack('اختر المادة');
-      return;
-    }
+final subject = (_selectedSubject ?? '').trim();
+
+if (subject.isEmpty) {
+  _showSnack('اختر المادة');
+  return;
+}
 
     if (_videoFile == null) {
       _showSnack('اختر الفيديو');
@@ -137,18 +137,17 @@ class _AdminLessonsPageState extends State<AdminLessonsPage> {
     });
 
     try {
-      final data = await _api.multipartPost(
-        '/api/lessons/upload',
-        fields: {
-          'subject': _selectedSubject!.trim(),
-          'lesson_name': _lessonNameCtrl.text.trim(),
-          'lesson_id': _lessonIdCtrl.text.trim(),
-          'quiz_marks_json': jsonEncode(_buildQuizMarksJson()),
-        },
-        files: {
-          'video': _videoFile!,
-        },
-      );
+final data = await _api.multipartPost(
+  '/api/lessons/upload',
+  fields: {
+    'subject': subject,
+    'lesson_name': _lessonNameCtrl.text.trim(),
+    'q_file': _qFileNameCtrl.text.trim(),
+'quiz_marks_json': jsonEncode(_buildQuizMarksJson()),  },
+  files: {
+    'video': _videoFile!,
+  },
+);
 
       setState(() {
         _statusMessage = data['message']?.toString() ?? 'تم رفع الدرس بنجاح';
@@ -173,7 +172,6 @@ class _AdminLessonsPageState extends State<AdminLessonsPage> {
 
   void _clearForm() {
     _lessonNameCtrl.clear();
-    _lessonIdCtrl.clear();
     _qFileNameCtrl.clear();
 
     for (final mark in _marks) {
@@ -563,18 +561,6 @@ class _AdminLessonsPageState extends State<AdminLessonsPage> {
                               validator: (v) {
                                 if (v == null || v.trim().isEmpty) {
                                   return 'اكتب اسم الدرس';
-                                }
-                                return null;
-                              },
-                            ),
-                            const SizedBox(height: 12),
-                            _buildTextField(
-                              controller: _lessonIdCtrl,
-                              label: 'Lesson ID',
-                              hint: 'مثال: math_lesson_1',
-                              validator: (v) {
-                                if (v == null || v.trim().isEmpty) {
-                                  return 'اكتب lesson_id';
                                 }
                                 return null;
                               },

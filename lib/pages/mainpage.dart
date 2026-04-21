@@ -256,29 +256,14 @@ void _openAdminPage() {
           ),
 
           // ✅ زر الأدمن هنا
-          if (_adminVisible) ...[
-            const SizedBox(height: 6),
-            GestureDetector(
-              onTap: () {
-                _playClickSound();
-                _openAdminPage();
-              },
-              child: Column(
-                children: const [
-                  Icon(
-                    Icons.admin_panel_settings,
-                    color: Colors.redAccent,
-                    size: 22,
-                  ),
-                  SizedBox(height: 2),
-                  Text(
-                    "Admin",
-                    style: TextStyle(color: Colors.redAccent, fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          ],
+if (_adminVisible) ...[
+  const SizedBox(height: 6),
+  const Icon(
+    Icons.admin_panel_settings,
+    color: Colors.redAccent,
+    size: 22,
+  ),
+],
         ],
       ),
     );
@@ -481,6 +466,7 @@ void _openAdminPage() {
                                 const LessonsSubjectsPage(),
                                 isSmall: true,
                               ),
+                                  const SizedBox(width: 130),
                               _buildCloudButton(
                                 'Sheets',
                                 const SheetsPage(),
