@@ -28,23 +28,22 @@ Future<void> _fetchLeaderboard() async {
       final data = await apiClient.get('/leaderboard');
       
       if (mounted) {
-        setState(() {
-          // 1. لو السيرفر رجع رسالة خطأ صريحة
-          if (data is Map && data.containsKey('error')) {
-            errorMessage = "خطأ من السيرفر: ${data['error']}";
-          } 
-          // 2. لو الداتا رجعت زي ما إحنا متوقعين (قائمة)
-          else if (data is List) {
-leaderboard = (data as List?) ?? [];          } 
-          // 3. لو راجعة جوه مفتاح اسمه items (لو الـ ApiClient متبرمج كده)
-          else if (data is Map && data.containsKey('items')) {
-            leaderboard = data['items'] as List<dynamic>;
-          }
-          else {
-            errorMessage = "تنسيق البيانات غير معروف";
-          }
-          isLoading = false;
-        });
+setState(() {
+  // 1. لو السيرفر بعت رسالة خطأ جوه الـ Map
+  if (data.containsKey('error')) {
+    errorMessage = "خطأ من السيرفر: ${data['error']}";
+  } 
+  // 2. لو السيرفر بعت الداتا في مفتاح اسمه 'items' (الحالة الأكيدة طالما هي Map)
+  else if (data.containsKey('items')) {
+    leaderboard = data['items'] as List<dynamic>;
+  } 
+  // 3. حالة احتياطية لو التنسيق غريب
+  else {
+    errorMessage = "تنسيق البيانات غير معروف";
+  }
+
+  isLoading = false;
+});
       }
     } catch (e) {
       debugPrint("LEADERBOARD ERROR: $e");

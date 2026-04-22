@@ -18,6 +18,7 @@ class _ShopPageState extends State<ShopPage> with TickerProviderStateMixin {
   final ApiClient _apiClient = ApiClient('http://192.168.1.114:3000');
   late final ShopApi _shopApi = ShopApi(_apiClient);
   late final AuthApi _authApi = AuthApi(_apiClient);
+  late TabController _categoryTabController; // متحكم التصنيفات الفرعية ✅
 
   int _userCoins = 0;
   List<dynamic> _allStoreItems = [];
@@ -42,12 +43,14 @@ class _ShopPageState extends State<ShopPage> with TickerProviderStateMixin {
   // ---------------------------------------------------------
   // 2. دورة حياة الصفحة (Initialization)
   // ---------------------------------------------------------
-  @override
-  void initState() {
-    super.initState();
-    _mainTabController = TabController(length: 2, vsync: this);
-    _loadAllData();
-  }
+@override
+void initState() {
+  super.initState();
+  _mainTabController = TabController(length: 2, vsync: this);
+  _categoryTabController = TabController(length: _categories.length, vsync: this);
+  
+  _loadAllData();
+}
 
   @override
   void dispose() {
@@ -124,31 +127,31 @@ class _ShopPageState extends State<ShopPage> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildNestedCategoryView(List<dynamic> dataList, {required bool isStore}) {
-    return DefaultTabController(
-      length: _categories.length,
-      child: Column(
-        children: [
-          TabBar(
-            isScrollable: true,
-            labelColor: darkGold,
-            unselectedLabelColor: Colors.grey,
-            indicatorColor: goldColor,
-            labelStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            tabs: _categories.map((cat) => Tab(text: cat['name'])).toList(),
-          ),
-          Expanded(
-            child: TabBarView(
-              children: _categories.map((cat) {
-                final filtered = dataList.where((i) => i['item_type'] == cat['id']).toList();
-                return _buildItemGrid(filtered, isStore);
-              }).toList(),
-            ),
-          ),
-        ],
+Widget _buildNestedCategoryView(List<dynamic> dataList, {required bool isStore}) {
+  // شيلنا DefaultTabController واستخدمنا Column مباشرة ✅
+  return Column(
+    children: [
+      TabBar(
+        controller: _categoryTabController, // ربط المتحكم بالبار ✅
+        isScrollable: true,
+        labelColor: darkGold,
+        unselectedLabelColor: Colors.grey,
+        indicatorColor: goldColor,
+        labelStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        tabs: _categories.map((cat) => Tab(text: cat['name'])).toList(),
       ),
-    );
-  }
+      Expanded(
+        child: TabBarView(
+          controller: _categoryTabController, // ربط المتحكم بالعرض ✅
+          children: _categories.map((cat) {
+            final filtered = dataList.where((i) => i['item_type'] == cat['id']).toList();
+            return _buildItemGrid(filtered, isStore);
+          }).toList(),
+        ),
+      ),
+    ],
+  );
+}
 
   Widget _buildItemGrid(List<dynamic> items, bool isStore) {
     if (items.isEmpty) {
