@@ -35,15 +35,6 @@ class LessonsSubjectsPage extends StatelessWidget {
                       onPressed: () => Navigator.pop(context),
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'اختر المادة',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
                   const SizedBox(height: 20),
                   Expanded(
                     child: Center(

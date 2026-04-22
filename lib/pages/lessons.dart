@@ -105,6 +105,7 @@ class _LessonsPageState extends State<LessonsPage> {
   final Map<String, double> _progressByLessonId = {};
   final Set<String> _favoriteLessons = {};
   final Map<String, List<VideoBookmark>> _bookmarksByLessonId = {};
+  final Set<String> _rewardedLessonsSession = {}; // إضافة جديدة لتتبع الدروس المكتملة
 
   List<QuizMark> _quizMarks = [];
   bool _quizDialogOpen = false;
@@ -211,7 +212,7 @@ class _LessonsPageState extends State<LessonsPage> {
     }
   }
 
-  Future<void> _loadServerState() async {
+Future<void> _loadServerState() async {
     try {
       final items = await lessonsApi.getState();
       for (final row in items) {
@@ -225,6 +226,11 @@ class _LessonsPageState extends State<LessonsPage> {
         _lastPosByLessonId[lessonId] = Duration(milliseconds: posMs);
         _progressByLessonId[lessonId] = prog.clamp(0.0, 1.0);
         if (fav) _favoriteLessons.add(lessonId);
+
+        // إضافة جديدة: لو التقدم 95% أو أكتر، نعتبره مكتمل
+        if (prog >= 0.99) {
+          _rewardedLessonsSession.add(lessonId);
+        }
       }
       if (mounted) setState(() {});
     } catch (e) {
@@ -396,6 +402,20 @@ class _LessonsPageState extends State<LessonsPage> {
               .clamp(0.0, 1.0);
         }
         _progressByLessonId[lesson.id] = prog;
+        // --- كود المكافأة الجديد ---
+        if (prog >= 0.95 && !_rewardedLessonsSession.contains(lesson.id)) {
+          _rewardedLessonsSession.add(lesson.id);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text("🎉 عاااش! خلصت الدرس وكسبت 20 نجمة و 10 كوينز", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                backgroundColor: Colors.green,
+                duration: Duration(seconds: 4),
+              ),
+            );
+          }
+        }
+        // --- نهاية كود المكافأة ---
         _lastPosByLessonId[lesson.id] = _position;
 
         final prev = _lastTickPos;
@@ -635,7 +655,7 @@ class _LessonsPageState extends State<LessonsPage> {
               });
 
               try {
-                final ok =
+final ok =
                     await lessonsApi.answerQuiz(lessonId, mark.id, selectedKey!);
 
                 if (!ok) {
@@ -644,6 +664,16 @@ class _LessonsPageState extends State<LessonsPage> {
                     localError = "إجابة خاطئة، حاول مرة أخرى";
                   });
                   return;
+                }
+
+                // إضافة جديدة: إظهار رسالة لو جاوب صح لأول مرة
+                if (!mark.answered && mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text("⭐ إجابة صحيحة! كسبت 5 نجوم و 2 كوينز", style: TextStyle(fontWeight: FontWeight.bold)),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
                 }
 
                 mark.answered = true;
@@ -1085,6 +1115,7 @@ class _LessonsPageState extends State<LessonsPage> {
                                     .clamp(0.0, 1.0);
                                 final bmCount =
                                     (_bookmarksByLessonId[l.id]?.length ?? 0);
+                                        final isCompleted = prog >= 0.95;
 
                                 return InkWell(
                                   borderRadius: BorderRadius.circular(14),
@@ -1106,15 +1137,17 @@ class _LessonsPageState extends State<LessonsPage> {
                                       crossAxisAlignment:
                                           CrossAxisAlignment.start,
                                       children: [
+// 1. المتغير الجديد لمعرفة الدرس اكتمل ولا لأ
                                         Row(
                                           children: [
+                                            // 2. الأيقونة الجديدة اللي بتتغير لو الدرس اكتمل
                                             Icon(
-                                              fav
-                                                  ? Icons.star
-                                                  : Icons.play_circle_outline,
-                                              color: fav
-                                                  ? Colors.amber
-                                                  : Colors.white70,
+                                              isCompleted 
+                                                  ? Icons.check_circle 
+                                                  : (fav ? Icons.star : Icons.play_circle_outline),
+                                              color: isCompleted 
+                                                  ? Colors.greenAccent 
+                                                  : (fav ? Colors.amber : Colors.white70),
                                             ),
                                             const SizedBox(width: 10),
                                             Expanded(
@@ -1214,14 +1247,6 @@ class _LessonsPageState extends State<LessonsPage> {
   Widget _buildTitleBar(bool hasLessons, LessonItem currentLesson) {
     return Column(
       children: [
-        strokeText(
-          widget.title,
-          size: 28,
-          fillColor: const Color.fromARGB(255, 0, 0, 0),
-          strokeColor: const Color.fromARGB(255, 255, 255, 255),
-          strokeWidth: 1.5,
-        ),
-        const SizedBox(height: 6),
         Wrap(
           alignment: WrapAlignment.center,
           crossAxisAlignment: WrapCrossAlignment.center,

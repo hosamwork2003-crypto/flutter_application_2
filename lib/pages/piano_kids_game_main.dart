@@ -583,22 +583,31 @@ class _KidsPianoGameState extends State<KidsPianoGame> {
         (_childSequence.length + 1) == _teacherSequence.length;
 
 if (completedSequence) {
-  final earned = _teacherSequence.length * 10;
+  // حساب المكافآت الجديدة بناءً على طول التحدي
+  final seqLen = _teacherSequence.length;
+  final earnedScore = seqLen * 10; // نقاط اللعبة الوهمية
+  final earnedStars = seqLen; // نجمة عن كل نغمة (يعني لو التحدي 3 نغمات = 3 نجوم)
+  final earnedCoins = earnedStars * 2; // الكوينز ضعف النجوم زي ما برمجناها في السيرفر
 
   _childSequence.clear();
   _syncSequenceCounters();
 
-  _scoreNotifier.value = _scoreNotifier.value + earned;
-  _starsNotifier.value = _starsNotifier.value + 1;
+  _scoreNotifier.value = _scoreNotifier.value + earnedScore;
+  _starsNotifier.value = _starsNotifier.value + earnedStars; // زيادة النجوم الفعلية
   _setGameState(0);
 
   _teacherSequence.clear();
   _syncSequenceCounters();
   _setHighlightedNote(null);
-  _setMessage('أحسنت! انتهى التحدي بنجاح');
+  
+  // تحديث الرسالة اللي فوق
+  _setMessage('أحسنت! كسبت $earnedStars نجوم و $earnedCoins كوينز');
 
+  // حفظ الحالة وإرسال النجوم الجديدة للسيرفر (والسيرفر هيترجمها لكوينز أوتوماتيك)
   _savePianoProfile();
-  _showSnack('ممتاز! +$earned نقطة ⭐', Colors.green);
+  
+  // إظهار رسالة المكافأة للطفل
+  _showSnack('ممتاز! +$earnedStars نجوم ⭐ و +$earnedCoins كوينز 🪙', Colors.green);
 
   Future.delayed(const Duration(milliseconds: 180), () {
     if (!mounted) return;
